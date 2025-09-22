@@ -1,0 +1,25 @@
+# Build outputs
+bin/
+dist/
+*.exe
+*.out
+
+# Coverage reports
+coverage.*
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Dependency vendors
+vendor/
+
+# IDE/Editor metadata
+.idea/
+.vscode/
+*.iml
+
+# Logs and temp files
+*.log
+tmp/
