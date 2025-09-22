@@ -149,8 +149,8 @@ func (m *Module) handleRecentMessages(c *gin.Context) {
 }
 
 type createMessageRequest struct {
-	AgentID uint64 `json:"agent_id" binding:"required"`
-	UserID  uint64 `json:"user_id" binding:"required"`
+	AgentID string `json:"agent_id" binding:"required"`
+	UserID  string `json:"user_id" binding:"required"`
 	Role    string `json:"role" binding:"required"`
 	Content string `json:"content" binding:"required"`
 }
@@ -176,8 +176,15 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 		return
 	}
 
-	if req.AgentID == 0 || req.UserID == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "agent_id and user_id must be positive"})
+	agentID, parseErr := parsePositiveUint(req.AgentID, "agent_id")
+	if parseErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": parseErr.Error()})
+		return
+	}
+
+	userID, parseErr := parsePositiveUint(req.UserID, "user_id")
+	if parseErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": parseErr.Error()})
 		return
 	}
 
@@ -203,15 +210,15 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 		now := time.Now().UTC()
 
 		var conv conversation
-		err := tx.Where("agent_id = ? AND user_id = ?", req.AgentID, req.UserID).Take(&conv).Error
+		err := tx.Where("agent_id = ? AND user_id = ?", agentID, userID).Take(&conv).Error
 		if err != nil {
 			if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
 
 			conv = conversation{
-				AgentID:   req.AgentID,
-				UserID:    req.UserID,
+				AgentID:   agentID,
+				UserID:    userID,
 				Status:    "active",
 				StartedAt: now,
 				LastMsgAt: now,
@@ -309,6 +316,20 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, response)
+}
+
+func parsePositiveUint(value, field string) (uint64, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, fmt.Errorf("%s is required", field)
+	}
+
+	id, err := strconv.ParseUint(trimmed, 10, 64)
+	if err != nil || id == 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", field)
+	}
+
+	return id, nil
 }
 
 func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, userMsg message) (*messageRecord, error) {

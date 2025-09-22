@@ -6,7 +6,7 @@ type conversation struct {
 	ID        uint64    `gorm:"primaryKey"`
 	AgentID   uint64    `gorm:"column:agent_id"`
 	UserID    uint64    `gorm:"column:user_id"`
-	Status 	  string    `gorm:"type:ENUM('active','archived','ended');not null;default:'active';index:idx_conversations_user_agent,priority:3"`
+	Status    string    `gorm:"type:ENUM('active','archived','ended');not null;default:'active';index:idx_conversations_user_agent,priority:3"`
 	LastMsgAt time.Time `gorm:"column:last_msg_at"`
 	StartedAt time.Time `gorm:"column:started_at"`
 	CreatedAt time.Time `gorm:"column:created_at"`
