@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS `agents` (
   `opening_line` TEXT DEFAULT NULL COMMENT '首轮对话默认问候',
   `first_turn_hint` TEXT DEFAULT NULL COMMENT '引导首条回复的提示',
   `live2d_model_id` VARCHAR(100) DEFAULT NULL COMMENT '关联的 Live2D 模型标识',
+  `avatar_url` VARCHAR(255) DEFAULT NULL COMMENT '智能体头像对象存储 URL',
   `status` ENUM('draft','active','paused','archived') NOT NULL DEFAULT 'draft' COMMENT '生命周期状态',
   `lang_default` VARCHAR(10) NOT NULL DEFAULT 'zh-CN' COMMENT '默认语言代码',
   `tags` JSON DEFAULT NULL COMMENT '业务标签 JSON 数组',

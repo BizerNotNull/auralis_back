@@ -113,6 +113,13 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 	return &Module{db: db, userStore: userStore, jwtMiddleware: middleware}, nil
 }
 
+func (m *Module) Middleware() gin.HandlerFunc {
+	if m == nil || m.jwtMiddleware == nil {
+		return nil
+	}
+	return m.jwtMiddleware.MiddlewareFunc()
+}
+
 func openDatabase(driver, dsn string) (*gorm.DB, error) {
 	switch strings.ToLower(driver) {
 	case "postgres", "postgresql", "pg":

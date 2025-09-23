@@ -53,10 +53,17 @@ func main() {
 	r := gin.Default()
 	configureCORS(r)
 
-	if _, err := authorization.RegisterRoutes(r); err != nil {
+	authModule, err := authorization.RegisterRoutes(r)
+	if err != nil {
 		log.Fatalf("register auth routes: %v", err)
 	}
-	if _, err := agents.RegisterRoutes(r); err != nil {
+
+	var authMiddleware gin.HandlerFunc
+	if authModule != nil {
+		authMiddleware = authModule.Middleware()
+	}
+
+	if _, err := agents.RegisterRoutes(r, authMiddleware); err != nil {
 		log.Fatalf("register agent routes: %v", err)
 	}
 	if _, err := llm.RegisterRoutes(r); err != nil {
