@@ -1,6 +1,10 @@
 package llm
 
-import "time"
+import (
+	"time"
+
+	"gorm.io/datatypes"
+)
 
 type conversation struct {
 	ID        uint64    `gorm:"primaryKey"`
@@ -18,19 +22,20 @@ func (conversation) TableName() string {
 }
 
 type message struct {
-	ID              uint64    `gorm:"primaryKey"`
-	ConversationID  uint64    `gorm:"column:conversation_id"`
-	Seq             int       `gorm:"column:seq"`
-	Role            string    `gorm:"column:role"`
-	Format          string    `gorm:"column:format"`
-	Content         string    `gorm:"column:content"`
-	ParentMessageID *uint64   `gorm:"column:parent_msg_id"`
-	LatencyMs       *int      `gorm:"column:latency_ms"`
-	TokenInput      *int      `gorm:"column:token_input"`
-	TokenOutput     *int      `gorm:"column:token_output"`
-	ErrCode         *string   `gorm:"column:err_code"`
-	ErrMsg          *string   `gorm:"column:err_msg"`
-	CreatedAt       time.Time `gorm:"column:created_at"`
+	ID              uint64         `gorm:"primaryKey"`
+	ConversationID  uint64         `gorm:"column:conversation_id"`
+	Seq             int            `gorm:"column:seq"`
+	Role            string         `gorm:"column:role"`
+	Format          string         `gorm:"column:format"`
+	Content         string         `gorm:"column:content"`
+	ParentMessageID *uint64        `gorm:"column:parent_msg_id"`
+	LatencyMs       *int           `gorm:"column:latency_ms"`
+	TokenInput      *int           `gorm:"column:token_input"`
+	TokenOutput     *int           `gorm:"column:token_output"`
+	ErrCode         *string        `gorm:"column:err_code"`
+	ErrMsg          *string        `gorm:"column:err_msg"`
+	Extras          datatypes.JSON `gorm:"column:extras"`
+	CreatedAt       time.Time      `gorm:"column:created_at"`
 }
 
 func (message) TableName() string {

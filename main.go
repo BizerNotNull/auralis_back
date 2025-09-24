@@ -8,7 +8,9 @@ import (
 
 	"auralis_back/agents"
 	"auralis_back/authorization"
+	"auralis_back/live2d"
 	"auralis_back/llm"
+	"auralis_back/tts"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -66,7 +68,14 @@ func main() {
 	if _, err := agents.RegisterRoutes(r, authMiddleware); err != nil {
 		log.Fatalf("register agent routes: %v", err)
 	}
-	if _, err := llm.RegisterRoutes(r); err != nil {
+	if _, err := live2d.RegisterRoutes(r, authMiddleware); err != nil {
+		log.Fatalf("register live2d routes: %v", err)
+	}
+	ttsModule, err := tts.RegisterRoutes(r)
+	if err != nil {
+		log.Fatalf("register tts routes: %v", err)
+	}
+	if _, err := llm.RegisterRoutes(r, ttsModule); err != nil {
 		log.Fatalf("register llm routes: %v", err)
 	}
 

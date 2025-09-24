@@ -1,14 +1,18 @@
 package authorization
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	filestore "auralis_back/storage"
 	jwt "github.com/appleboy/gin-jwt/v2"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
@@ -23,9 +27,12 @@ const (
 	defaultTimeout = time.Hour
 )
 
+const userAvatarURLExpiry = 15 * time.Minute
+
 var (
-	ErrUsernameTaken = errors.New("authorization: username already exists")
-	ErrWeakPassword  = errors.New("authorization: password must be at least 6 characters")
+	ErrUsernameTaken      = errors.New("authorization: username already exists")
+	ErrWeakPassword       = errors.New("authorization: password must be at least 6 characters")
+	ErrInvalidDisplayName = errors.New("authorization: display name cannot be empty")
 )
 
 // Module wires together the JWT middleware and backing services.
@@ -33,6 +40,8 @@ type Module struct {
 	db            *gorm.DB
 	userStore     *UserStore
 	jwtMiddleware *jwt.GinJWTMiddleware
+	captcha       *CaptchaStore
+	avatarStorage *filestore.AvatarStorage
 }
 
 // RegisterRoutes bootstraps the authentication endpoints under /auth.
@@ -60,14 +69,35 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 	}
 
 	userStore := &UserStore{db: db}
+	captchaStore := NewCaptchaStore(3 * time.Minute)
+	avatarStore, err := filestore.NewAvatarStorageFromEnv()
+	if err != nil {
+		return nil, err
+	}
 	authService := &AuthService{users: userStore}
 
-	middleware, err := buildJWTMiddleware(authService)
+	middleware, err := buildJWTMiddleware(authService, avatarStore)
 	if err != nil {
 		return nil, err
 	}
 
 	authGroup := router.Group("/auth")
+	authGroup.GET("/captcha", func(c *gin.Context) {
+		challenge := captchaStore.Issue()
+		expiresIn := int(challenge.TTL.Seconds())
+		if expiresIn < 1 {
+			expiresIn = int(time.Until(challenge.ExpiresAt).Seconds())
+			if expiresIn < 1 {
+				expiresIn = 1
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"captcha_id": challenge.ID,
+			"question":   challenge.Question,
+			"expires_in": expiresIn,
+			"expires_at": challenge.ExpiresAt.UTC(),
+		})
+	})
 	authGroup.POST("/register", func(c *gin.Context) {
 		var req RegisterRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -75,7 +105,18 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 			return
 		}
 
-		user, err := authService.Register(c.Request.Context(), req.Username, req.Password)
+		if captchaStore != nil && !captchaStore.Verify(req.CaptchaID, req.CaptchaAnswer) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid captcha"})
+			return
+		}
+
+		displayName := strings.TrimSpace(req.DisplayName)
+		if displayName == "" {
+			displayName = req.Username
+		}
+
+		ctx := c.Request.Context()
+		user, err := authService.Register(ctx, req.Username, req.Password, displayName, req.AvatarURL, req.Bio)
 		if err != nil {
 			switch {
 			case errors.Is(err, jwt.ErrMissingLoginValues):
@@ -90,27 +131,184 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 			return
 		}
 
-		c.JSON(http.StatusCreated, gin.H{
-			"id":       user.ID,
-			"username": user.Username,
-		})
+		roles, err := userStore.FindRoleNames(ctx, user.ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load user roles"})
+			return
+		}
+
+		c.JSON(http.StatusCreated, gin.H{"user": buildUserPayload(c.Request.Context(), avatarStore, user, roles)})
 	})
 
-	authGroup.POST("/login", middleware.LoginHandler)
+	authGroup.POST("/login", func(c *gin.Context) {
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+		if len(body) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
+			return
+		}
+
+		var req LoginRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
+			return
+		}
+
+		if captchaStore != nil && !captchaStore.Verify(req.CaptchaID, req.CaptchaAnswer) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid captcha"})
+			return
+		}
+
+		c.Request.Body = io.NopCloser(bytes.NewReader(body))
+		middleware.LoginHandler(c)
+	})
 	authGroup.POST("/refresh", middleware.RefreshHandler)
 
 	secured := authGroup.Group("")
 	secured.Use(middleware.MiddlewareFunc())
 	secured.GET("/profile", func(c *gin.Context) {
 		claims := jwt.ExtractClaims(c)
-		c.JSON(200, gin.H{
-			"id":       claims[identityKey],
-			"username": claims["username"],
-			"roles":    claims["roles"],
-		})
+		userID := extractUserID(claims)
+		if userID == 0 {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			return
+		}
+
+		ctx := c.Request.Context()
+		user, err := userStore.FindByID(ctx, userID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load user"})
+			return
+		}
+
+		roles, err := userStore.FindRoleNames(ctx, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load roles"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"user": buildUserPayload(ctx, avatarStore, user, roles)})
 	})
 
-	return &Module{db: db, userStore: userStore, jwtMiddleware: middleware}, nil
+	secured.PUT("/profile", func(c *gin.Context) {
+		var req UpdateProfileRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
+			return
+		}
+		if req.DisplayName == nil && req.AvatarURL == nil && req.Bio == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+			return
+		}
+
+		claims := jwt.ExtractClaims(c)
+		userID := extractUserID(claims)
+		if userID == 0 {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			return
+		}
+
+		ctx := c.Request.Context()
+		updated, err := userStore.UpdateProfile(ctx, userID, UpdateProfileParams{
+			DisplayName: req.DisplayName,
+			AvatarURL:   req.AvatarURL,
+			Bio:         req.Bio,
+		})
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrInvalidDisplayName):
+				c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidDisplayName.Error()})
+			case errors.Is(err, gorm.ErrRecordNotFound):
+				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			default:
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update profile"})
+			}
+			return
+		}
+
+		roles, err := userStore.FindRoleNames(ctx, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load roles"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"user": buildUserPayload(ctx, avatarStore, updated, roles)})
+	})
+
+	secured.POST("/profile/avatar", func(c *gin.Context) {
+		if avatarStore == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "avatar upload not configured"})
+			return
+		}
+
+		claims := jwt.ExtractClaims(c)
+		userID := extractUserID(claims)
+		if userID == 0 {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			return
+		}
+
+		file, err := c.FormFile("avatar")
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "avatar file is required"})
+			return
+		}
+
+		ctx := c.Request.Context()
+		existing, err := userStore.FindByID(ctx, userID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load user"})
+			}
+			return
+		}
+
+		var oldAvatar string
+		if existing.AvatarURL != nil {
+			oldAvatar = strings.TrimSpace(*existing.AvatarURL)
+		}
+
+		uploaded, err := avatarStore.Upload(ctx, file, "users", fmt.Sprintf("%d", userID))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to upload avatar", "details": err.Error()})
+			return
+		}
+
+		updated, err := userStore.UpdateProfile(ctx, userID, UpdateProfileParams{AvatarURL: &uploaded})
+		if err != nil {
+			_ = avatarStore.Remove(ctx, uploaded)
+			switch {
+			case errors.Is(err, gorm.ErrRecordNotFound):
+				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			default:
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update profile"})
+			}
+			return
+		}
+
+		if oldAvatar != "" && oldAvatar != uploaded {
+			_ = avatarStore.Remove(ctx, oldAvatar)
+		}
+
+		roles, err := userStore.FindRoleNames(ctx, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load roles"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"user": buildUserPayload(ctx, avatarStore, updated, roles)})
+	})
+
+	return &Module{db: db, userStore: userStore, jwtMiddleware: middleware, captcha: captchaStore, avatarStorage: avatarStore}, nil
 }
 
 func (m *Module) Middleware() gin.HandlerFunc {
@@ -147,7 +345,7 @@ func inferDriverFromDSN(dsn string) string {
 	}
 }
 
-func buildJWTMiddleware(service *AuthService) (*jwt.GinJWTMiddleware, error) {
+func buildJWTMiddleware(service *AuthService, store *filestore.AvatarStorage) (*jwt.GinJWTMiddleware, error) {
 	secret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
 	if secret == "" {
 		return nil, errors.New("authorization: JWT_SECRET environment variable is required")
@@ -209,6 +407,8 @@ func buildJWTMiddleware(service *AuthService) (*jwt.GinJWTMiddleware, error) {
 				return nil, err
 			}
 
+			c.Set("authenticated_user", user)
+
 			return user, nil
 		},
 		Authorizator: func(data interface{}, c *gin.Context) bool {
@@ -218,7 +418,54 @@ func buildJWTMiddleware(service *AuthService) (*jwt.GinJWTMiddleware, error) {
 		Unauthorized: func(c *gin.Context, code int, message string) {
 			c.JSON(code, gin.H{"error": message})
 		},
-		TokenLookup:   "header: Authorization, cookie: jwt",
+		LoginResponse: func(c *gin.Context, code int, token string, expire time.Time) {
+			response := gin.H{
+				"token":  token,
+				"expire": expire,
+			}
+
+			if value, ok := c.Get("authenticated_user"); ok {
+				if authUser, ok := value.(*AuthenticatedUser); ok && authUser != nil {
+					if user, err := service.users.FindByID(c.Request.Context(), authUser.ID); err == nil {
+						roles := authUser.Roles
+						if roles == nil {
+							roles = []string{}
+						}
+						response["user"] = buildUserPayload(c.Request.Context(), store, user, roles)
+					}
+				}
+			} else {
+				claims := jwt.ExtractClaims(c)
+				userID := extractUserID(claims)
+				if userID != 0 {
+					if user, err := service.users.FindByID(c.Request.Context(), userID); err == nil {
+						roles := extractRoles(claims)
+						response["user"] = buildUserPayload(c.Request.Context(), store, user, roles)
+					}
+				}
+			}
+
+			c.JSON(code, response)
+		},
+		RefreshResponse: func(c *gin.Context, code int, token string, expire time.Time) {
+			response := gin.H{
+				"token":  token,
+				"expire": expire,
+			}
+
+			claims := jwt.ExtractClaims(c)
+			userID := extractUserID(claims)
+			roles := extractRoles(claims)
+
+			if userID != 0 {
+				if user, err := service.users.FindByID(c.Request.Context(), userID); err == nil {
+					response["user"] = buildUserPayload(c.Request.Context(), store, user, roles)
+				}
+			}
+
+			c.JSON(code, response)
+		},
+		TokenLookup:   "header: Authorization, cookie: jwt, cookie: token",
 		TokenHeadName: "Bearer",
 		TimeFunc:      time.Now,
 	})
@@ -226,14 +473,28 @@ func buildJWTMiddleware(service *AuthService) (*jwt.GinJWTMiddleware, error) {
 
 // LoginRequest represents the expected payload for the login endpoint.
 type LoginRequest struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
+	Username      string `json:"username" binding:"required"`
+	Password      string `json:"password" binding:"required"`
+	CaptchaID     string `json:"captcha_id" binding:"required"`
+	CaptchaAnswer string `json:"captcha_answer" binding:"required"`
 }
 
 // RegisterRequest captures the payload for user registration.
 type RegisterRequest struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required,min=6"`
+	Username      string  `json:"username" binding:"required"`
+	Password      string  `json:"password" binding:"required,min=6"`
+	DisplayName   string  `json:"display_name"`
+	CaptchaID     string  `json:"captcha_id" binding:"required"`
+	CaptchaAnswer string  `json:"captcha_answer" binding:"required"`
+	AvatarURL     *string `json:"avatar_url"`
+	Bio           *string `json:"bio"`
+}
+
+// UpdateProfileRequest captures profile update fields.
+type UpdateProfileRequest struct {
+	DisplayName *string `json:"display_name"`
+	AvatarURL   *string `json:"avatar_url"`
+	Bio         *string `json:"bio"`
 }
 
 // AuthenticatedUser is the minimal identity stored inside JWT claims.
@@ -275,9 +536,10 @@ func (s *AuthService) Authenticate(ctx context.Context, username, password strin
 }
 
 // Register creates a new user with the provided credentials.
-func (s *AuthService) Register(ctx context.Context, username, password string) (*User, error) {
+func (s *AuthService) Register(ctx context.Context, username, password, displayName string, avatarURL, bio *string) (*User, error) {
 	username = strings.TrimSpace(username)
 	password = strings.TrimSpace(password)
+	displayName = strings.TrimSpace(displayName)
 
 	if username == "" || password == "" {
 		return nil, jwt.ErrMissingLoginValues
@@ -285,13 +547,38 @@ func (s *AuthService) Register(ctx context.Context, username, password string) (
 	if len(password) < 6 {
 		return nil, ErrWeakPassword
 	}
+	if displayName == "" {
+		displayName = username
+	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, fmt.Errorf("authorization: hash password: %w", err)
 	}
 
-	user := &User{Username: username, PasswordHash: string(hash)}
+	var storedAvatar *string
+	if avatarURL != nil {
+		if trimmed := strings.TrimSpace(*avatarURL); trimmed != "" {
+			value := trimmed
+			storedAvatar = &value
+		}
+	}
+
+	var storedBio *string
+	if bio != nil {
+		if trimmed := strings.TrimSpace(*bio); trimmed != "" {
+			value := trimmed
+			storedBio = &value
+		}
+	}
+
+	user := &User{
+		Username:     username,
+		PasswordHash: string(hash),
+		DisplayName:  displayName,
+		AvatarURL:    storedAvatar,
+		Bio:          storedBio,
+	}
 	if err := s.users.Create(ctx, user); err != nil {
 		if errors.Is(err, gorm.ErrDuplicatedKey) {
 			return nil, ErrUsernameTaken
@@ -305,6 +592,26 @@ func (s *AuthService) Register(ctx context.Context, username, password string) (
 // UserStore provides data access helpers backed by GORM.
 type UserStore struct {
 	db *gorm.DB
+}
+
+// UpdateProfileParams holds the fields eligible for profile updates.
+type UpdateProfileParams struct {
+	DisplayName *string
+	AvatarURL   *string
+	Bio         *string
+}
+
+// FindByID loads a user by primary key.
+func (s *UserStore) FindByID(ctx context.Context, id uint) (*User, error) {
+	if s == nil {
+		return nil, errors.New("authorization: user store not initialized")
+	}
+	var user User
+	result := s.db.WithContext(ctx).Where("id = ?", id).First(&user)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &user, nil
 }
 
 // FindByUsername loads a user by unique username.
@@ -340,12 +647,65 @@ func (s *UserStore) FindRoleNames(ctx context.Context, userID uint) ([]string, e
 	return roles, nil
 }
 
+// UpdateProfile persists profile related fields for the given user id.
+func (s *UserStore) UpdateProfile(ctx context.Context, userID uint, params UpdateProfileParams) (*User, error) {
+	if s == nil {
+		return nil, errors.New("authorization: user store not initialized")
+	}
+
+	updates := make(map[string]interface{})
+
+	if params.DisplayName != nil {
+		name := strings.TrimSpace(*params.DisplayName)
+		if name == "" {
+			return nil, ErrInvalidDisplayName
+		}
+		updates["display_name"] = name
+	}
+
+	if params.AvatarURL != nil {
+		avatar := strings.TrimSpace(*params.AvatarURL)
+		if avatar == "" {
+			updates["avatar_url"] = nil
+		} else {
+			updates["avatar_url"] = avatar
+		}
+	}
+
+	if params.Bio != nil {
+		bio := strings.TrimSpace(*params.Bio)
+		if bio == "" {
+			updates["bio"] = nil
+		} else {
+			updates["bio"] = bio
+		}
+	}
+
+	if len(updates) == 0 {
+		return s.FindByID(ctx, userID)
+	}
+
+	updates["updated_at"] = time.Now().UTC()
+	result := s.db.WithContext(ctx).Model(&User{}).Where("id = ?", userID).Updates(updates)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+
+	return s.FindByID(ctx, userID)
+}
+
 // User represents an application account.
 type User struct {
-	ID           uint   `gorm:"primaryKey"`
-	Username     string `gorm:"uniqueIndex;size:64;not null"`
-	PasswordHash string `gorm:"size:255;not null"`
-	Status       string `gorm:"size:32;default:'active'"`
+	ID           uint    `gorm:"primaryKey"`
+	Username     string  `gorm:"uniqueIndex;size:64;not null"`
+	PasswordHash string  `gorm:"size:255;not null"`
+	DisplayName  string  `gorm:"size:128;not null;default:''"`
+	AvatarURL    *string `gorm:"size:255"`
+	Bio          *string `gorm:"type:text"`
+	Status       string  `gorm:"size:32;default:'active'"`
 	LastLoginAt  *time.Time
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -366,4 +726,97 @@ type UserRole struct {
 	UserID    uint `gorm:"uniqueIndex:idx_user_role;not null"`
 	RoleID    uint `gorm:"uniqueIndex:idx_user_role;not null"`
 	CreatedAt time.Time
+}
+
+func extractUserID(claims jwt.MapClaims) uint {
+	if claims == nil {
+		return 0
+	}
+	idValue, ok := claims[identityKey]
+	if !ok {
+		return 0
+	}
+
+	switch v := idValue.(type) {
+	case float64:
+		return uint(v)
+	case int64:
+		return uint(v)
+	case uint64:
+		return uint(v)
+	case int:
+		return uint(v)
+	case uint:
+		return v
+	case json.Number:
+		if parsed, err := v.Int64(); err == nil {
+			return uint(parsed)
+		}
+	}
+	return 0
+}
+
+func extractRoles(claims jwt.MapClaims) []string {
+	if claims == nil {
+		return []string{}
+	}
+
+	switch raw := claims["roles"].(type) {
+	case []string:
+		return append([]string{}, raw...)
+	case []interface{}:
+		roles := make([]string, 0, len(raw))
+		for _, role := range raw {
+			if name, ok := role.(string); ok {
+				roles = append(roles, name)
+			}
+		}
+		return roles
+	default:
+		return []string{}
+	}
+}
+
+func buildUserPayload(ctx context.Context, store *filestore.AvatarStorage, user *User, roles []string) gin.H {
+	if user == nil {
+		return gin.H{}
+	}
+
+	avatarURL := ""
+	if user.AvatarURL != nil {
+		avatarURL = strings.TrimSpace(*user.AvatarURL)
+		if store != nil {
+			if signed, err := store.PresignedURL(ctx, avatarURL, userAvatarURLExpiry); err == nil && signed != "" {
+				avatarURL = signed
+			}
+		}
+	}
+
+	bio := ""
+	if user.Bio != nil {
+		bio = *user.Bio
+	}
+
+	var avatarField interface{}
+	if avatarURL != "" {
+		avatarField = avatarURL
+	}
+
+	var bioField interface{}
+	if bio != "" {
+		bioField = bio
+	}
+
+	return gin.H{
+		"id":            user.ID,
+		"username":      user.Username,
+		"display_name":  user.DisplayName,
+		"avatar_url":    avatarField,
+		"bio":           bioField,
+		"status":        user.Status,
+		"last_login_at": user.LastLoginAt,
+		"created_at":    user.CreatedAt,
+		"updated_at":    user.UpdatedAt,
+		"roles":         roles,
+	}
 }
