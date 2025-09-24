@@ -158,6 +158,21 @@ CREATE TABLE IF NOT EXISTS `user_roles` (
 
 
 
+CREATE TABLE IF NOT EXISTS `live2d_models` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Live2D 模型 ID',
+  `key` VARCHAR(64) NOT NULL COMMENT '唯一标识符',
+  `name` VARCHAR(100) NOT NULL COMMENT '模型名称',
+  `description` TEXT DEFAULT NULL COMMENT '模型简介',
+  `storage_type` VARCHAR(16) NOT NULL DEFAULT 'local' COMMENT '存储类型: local/external',
+  `storage_path` VARCHAR(255) DEFAULT NULL COMMENT '本地存储目录',
+  `entry_file` VARCHAR(255) NOT NULL COMMENT '入口模型文件路径或 URL',
+  `preview_file` VARCHAR(255) DEFAULT NULL COMMENT '预览图路径或 URL',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT `pk_live2d_models` PRIMARY KEY (`id`),
+  CONSTRAINT `uk_live2d_models_key` UNIQUE (`key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='可供选择的 Live2D 模型配置';
+
 CREATE TABLE IF NOT EXISTS `agents` (
 
 
