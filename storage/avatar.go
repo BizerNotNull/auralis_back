@@ -1,4 +1,4 @@
-package agents
+package storage
 
 import (
 	"bytes"
@@ -22,13 +22,15 @@ import (
 
 const maxAvatarBytes int64 = 5 * 1024 * 1024
 
-type avatarStorage struct {
+// AvatarStorage provides helpers for storing avatar images in MinIO/S3.
+type AvatarStorage struct {
 	client    *minio.Client
 	bucket    string
 	publicURL string
 }
 
-func newAvatarStorageFromEnv() (*avatarStorage, error) {
+// NewAvatarStorageFromEnv initialises AvatarStorage using MINIO_* environment variables.
+func NewAvatarStorageFromEnv() (*AvatarStorage, error) {
 	endpoint := strings.TrimSpace(os.Getenv("MINIO_ENDPOINT"))
 	accessKey := strings.TrimSpace(os.Getenv("MINIO_ACCESS_KEY"))
 	secretKey := strings.TrimSpace(os.Getenv("MINIO_SECRET_KEY"))
@@ -43,7 +45,7 @@ func newAvatarStorageFromEnv() (*avatarStorage, error) {
 		Secure: useSSL,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("agents: init minio client: %w", err)
+		return nil, fmt.Errorf("init minio client: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -51,11 +53,11 @@ func newAvatarStorageFromEnv() (*avatarStorage, error) {
 
 	exists, err := client.BucketExists(ctx, bucket)
 	if err != nil {
-		return nil, fmt.Errorf("agents: check bucket: %w", err)
+		return nil, fmt.Errorf("check bucket: %w", err)
 	}
 	if !exists {
 		if err := client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
-			return nil, fmt.Errorf("agents: create bucket: %w", err)
+			return nil, fmt.Errorf("create bucket: %w", err)
 		}
 	}
 
@@ -68,14 +70,16 @@ func newAvatarStorageFromEnv() (*avatarStorage, error) {
 		publicURL = fmt.Sprintf("%s://%s", scheme, endpoint)
 	}
 
-	return &avatarStorage{
+	return &AvatarStorage{
 		client:    client,
 		bucket:    bucket,
 		publicURL: strings.TrimSuffix(publicURL, "/"),
 	}, nil
 }
 
-func (s *avatarStorage) Upload(ctx context.Context, agentID uint64, fileHeader *multipart.FileHeader) (string, error) {
+// Upload stores the provided avatar image beneath the given path segments.
+// The final object key will be avatars/<segments...>/<uuid>.<ext>.
+func (s *AvatarStorage) Upload(ctx context.Context, fileHeader *multipart.FileHeader, pathSegments ...string) (string, error) {
 	if s == nil || s.client == nil {
 		return "", errors.New("avatar storage not configured")
 	}
@@ -112,8 +116,18 @@ func (s *avatarStorage) Upload(ctx context.Context, agentID uint64, fileHeader *
 		return "", fmt.Errorf("unsupported avatar content type %q", contentType)
 	}
 
-	ext := avatarExtension(fileHeader.Filename, contentType)
-	objectName := path.Join("avatars", fmt.Sprintf("%d", agentID), fmt.Sprintf("%s%s", uuid.NewString(), ext))
+	objectPathSegments := []string{"avatars"}
+	for _, segment := range pathSegments {
+		trimmed := strings.Trim(segment, "/")
+		if trimmed != "" {
+			objectPathSegments = append(objectPathSegments, trimmed)
+		}
+	}
+	objectName := path.Join(objectPathSegments...)
+	if objectName == "" {
+		objectName = "avatars"
+	}
+	objectName = path.Join(objectName, fmt.Sprintf("%s%s", uuid.NewString(), avatarExtension(fileHeader.Filename, contentType)))
 
 	uploadCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -130,7 +144,8 @@ func (s *avatarStorage) Upload(ctx context.Context, agentID uint64, fileHeader *
 	return s.buildPublicURL(objectName), nil
 }
 
-func (s *avatarStorage) Remove(ctx context.Context, avatarURL string) error {
+// Remove deletes the object pointed to by the provided URL/object path.
+func (s *AvatarStorage) Remove(ctx context.Context, avatarURL string) error {
 	if s == nil || s.client == nil {
 		return nil
 	}
@@ -145,13 +160,50 @@ func (s *avatarStorage) Remove(ctx context.Context, avatarURL string) error {
 	return s.client.RemoveObject(removeCtx, s.bucket, objectName, minio.RemoveObjectOptions{})
 }
 
-func (s *avatarStorage) buildPublicURL(objectName string) string {
+// PresignedURL returns a temporary URL for accessing the provided avatar.
+func (s *AvatarStorage) PresignedURL(ctx context.Context, raw string, expiry time.Duration) (string, error) {
+	if s == nil || s.client == nil {
+		return strings.TrimSpace(raw), nil
+	}
+
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+
+	if expiry <= 0 {
+		expiry = 15 * time.Minute
+	}
+
+	objectName, ok := s.objectNameFromURL(trimmed)
+	if !ok {
+		if !strings.Contains(trimmed, "://") {
+			objectName = strings.TrimPrefix(trimmed, "/")
+			objectName = strings.TrimPrefix(objectName, s.bucket+"/")
+		}
+	}
+	if objectName == "" {
+		return trimmed, nil
+	}
+
+	presignCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	url, err := s.client.PresignedGetObject(presignCtx, s.bucket, objectName, expiry, nil)
+	if err != nil {
+		return "", err
+	}
+
+	return url.String(), nil
+}
+
+func (s *AvatarStorage) buildPublicURL(objectName string) string {
 	base := strings.TrimSuffix(s.publicURL, "/")
 	object := strings.TrimPrefix(objectName, "/")
 	return fmt.Sprintf("%s/%s/%s", base, s.bucket, object)
 }
 
-func (s *avatarStorage) objectNameFromURL(raw string) (string, bool) {
+func (s *AvatarStorage) objectNameFromURL(raw string) (string, bool) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return "", false
@@ -192,42 +244,6 @@ func (s *avatarStorage) objectNameFromURL(raw string) (string, bool) {
 	}
 
 	return "", false
-}
-
-func (s *avatarStorage) PresignedURL(ctx context.Context, raw string, expiry time.Duration) (string, error) {
-	if s == nil || s.client == nil {
-		return strings.TrimSpace(raw), nil
-	}
-
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return "", nil
-	}
-
-	if expiry <= 0 {
-		expiry = 15 * time.Minute
-	}
-
-	objectName, ok := s.objectNameFromURL(trimmed)
-	if !ok {
-		if !strings.Contains(trimmed, "://") {
-			objectName = strings.TrimPrefix(trimmed, "/")
-			objectName = strings.TrimPrefix(objectName, s.bucket+"/")
-		}
-	}
-	if objectName == "" {
-		return trimmed, nil
-	}
-
-	presignCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	url, err := s.client.PresignedGetObject(presignCtx, s.bucket, objectName, expiry, nil)
-	if err != nil {
-		return "", err
-	}
-
-	return url.String(), nil
 }
 
 func isAllowedAvatarContent(contentType string) bool {

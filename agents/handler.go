@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	filestore "auralis_back/storage"
 	jwt "github.com/appleboy/gin-jwt/v2"
 	"github.com/gin-gonic/gin"
 	"gorm.io/datatypes"
@@ -20,7 +21,7 @@ import (
 
 type Module struct {
 	db             *gorm.DB
-	avatars        *avatarStorage
+	avatars        *filestore.AvatarStorage
 	authMiddleware gin.HandlerFunc
 }
 
@@ -62,12 +63,12 @@ func RegisterRoutes(router *gin.Engine, authMiddleware gin.HandlerFunc) (*Module
 		return nil, err
 	}
 
-	storage, err := newAvatarStorageFromEnv()
+	avatarStore, err := filestore.NewAvatarStorageFromEnv()
 	if err != nil {
 		return nil, err
 	}
 
-	module := &Module{db: db, avatars: storage, authMiddleware: authMiddleware}
+	module := &Module{db: db, avatars: avatarStore, authMiddleware: authMiddleware}
 
 	group := router.Group("/agents")
 	group.GET("", module.handleListAgents)
@@ -228,7 +229,7 @@ func (m *Module) handleCreateAgent(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "avatar storage not configured"})
 			return
 		}
-		avatarURL, uploadErr := m.avatars.Upload(ctx, agent.ID, avatarFile)
+		avatarURL, uploadErr := m.avatars.Upload(ctx, avatarFile, "agents", fmt.Sprintf("%d", agent.ID))
 		if uploadErr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to upload avatar", "details": uploadErr.Error()})
 			return
@@ -301,7 +302,7 @@ func (m *Module) handleUpdateAgent(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "avatar storage not configured"})
 			return
 		}
-		uploaded, uploadErr := m.avatars.Upload(ctx, agentID, avatarFile)
+		uploaded, uploadErr := m.avatars.Upload(ctx, avatarFile, "agents", fmt.Sprintf("%d", agentID))
 		if uploadErr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to upload avatar", "details": uploadErr.Error()})
 			return

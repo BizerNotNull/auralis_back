@@ -1,0 +1,449 @@
+package llm
+
+import (
+	"auralis_back/agents"
+	"auralis_back/tts"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/datatypes"
+	"gorm.io/gorm"
+)
+
+// wantsEventStream determines if the client requested a streaming response.
+func wantsEventStream(c *gin.Context) bool {
+	accept := strings.ToLower(strings.TrimSpace(c.GetHeader("Accept")))
+	if strings.Contains(accept, "text/event-stream") {
+		return true
+	}
+	if header := strings.TrimSpace(c.GetHeader("X-Stream")); header != "" {
+		if strings.EqualFold(header, "1") || strings.EqualFold(header, "true") || strings.EqualFold(header, "yes") {
+			return true
+		}
+	}
+	if q := strings.TrimSpace(c.Query("stream")); q != "" {
+		if strings.EqualFold(q, "1") || strings.EqualFold(q, "true") || strings.EqualFold(q, "yes") {
+			return true
+		}
+	}
+	return false
+}
+
+// streamEvent writes a single Server-Sent Event to the response writer.
+func streamEvent(w gin.ResponseWriter, flusher http.Flusher, event string, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\n", event); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
+}
+
+type conversationContext struct {
+	agent    agents.Agent
+	config   *agents.AgentChatConfig
+	history  []message
+	messages []ChatMessage
+}
+
+func (m *Module) buildConversationContext(ctx context.Context, conv conversation) (*conversationContext, error) {
+	var agentModel agents.Agent
+	if err := m.db.WithContext(ctx).First(&agentModel, "id = ?", conv.AgentID).Error; err != nil {
+		return nil, fmt.Errorf("load agent: %w", err)
+	}
+
+	var cfg agents.AgentChatConfig
+	cfgErr := m.db.WithContext(ctx).First(&cfg, "agent_id = ?", conv.AgentID).Error
+	var cfgPtr *agents.AgentChatConfig
+	if cfgErr == nil {
+		cfgPtr = &cfg
+	} else if !errors.Is(cfgErr, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("load agent config: %w", cfgErr)
+	}
+
+	historyLimit := 20
+	var history []message
+	if err := m.db.WithContext(ctx).
+		Where("conversation_id = ?", conv.ID).
+		Order("seq ASC").
+		Limit(historyLimit).
+		Find(&history).Error; err != nil {
+		return nil, fmt.Errorf("load history: %w", err)
+	}
+
+	systemPrompt := buildSystemPrompt(&agentModel, cfgPtr)
+
+	messages := make([]ChatMessage, 0, len(history)+1)
+	if systemPrompt != "" {
+		messages = append(messages, ChatMessage{Role: "system", Content: systemPrompt})
+	}
+
+	for _, item := range history {
+		role := strings.ToLower(strings.TrimSpace(item.Role))
+		if role != "user" && role != "assistant" && role != "system" {
+			continue
+		}
+		messages = append(messages, ChatMessage{Role: role, Content: item.Content})
+	}
+
+	return &conversationContext{
+		agent:    agentModel,
+		config:   cfgPtr,
+		history:  history,
+		messages: messages,
+	}, nil
+}
+
+func messageToRecord(msg message, conv conversation) messageRecord {
+	return messageRecord{
+		ID:              msg.ID,
+		ConversationID:  msg.ConversationID,
+		AgentID:         conv.AgentID,
+		UserID:          conv.UserID,
+		Seq:             msg.Seq,
+		Role:            msg.Role,
+		Format:          msg.Format,
+		Content:         msg.Content,
+		ParentMessageID: msg.ParentMessageID,
+		LatencyMs:       msg.LatencyMs,
+		TokenInput:      msg.TokenInput,
+		TokenOutput:     msg.TokenOutput,
+		ErrCode:         msg.ErrCode,
+		ErrMsg:          msg.ErrMsg,
+		Extras:          toRawMessage(msg.Extras),
+		CreatedAt:       msg.CreatedAt,
+	}
+}
+
+func mergeExtras(existing datatypes.JSON, updates map[string]any) (datatypes.JSON, error) {
+	merged := make(map[string]any)
+	if len(existing) > 0 {
+		if err := json.Unmarshal(existing, &merged); err != nil {
+			return nil, err
+		}
+	}
+	for key, value := range updates {
+		merged[key] = value
+	}
+	if len(merged) == 0 {
+		return nil, nil
+	}
+	raw, err := json.Marshal(merged)
+	if err != nil {
+		return nil, err
+	}
+	return datatypes.JSON(raw), nil
+}
+
+func (m *Module) createAssistantPlaceholder(ctx context.Context, conv conversation, parent message) (message, error) {
+	var created message
+	err := m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var lastSeq int
+		if err := tx.Model(&message{}).Where("conversation_id = ?", conv.ID).Select("MAX(seq)").Scan(&lastSeq).Error; err != nil {
+			return err
+		}
+		seq := lastSeq + 1
+		parentID := parent.ID
+		msg := message{
+			ConversationID:  conv.ID,
+			Seq:             seq,
+			Role:            "assistant",
+			Format:          "text",
+			Content:         "",
+			ParentMessageID: &parentID,
+		}
+		if err := tx.Create(&msg).Error; err != nil {
+			return err
+		}
+		if err := tx.First(&msg, "id = ?", msg.ID).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&conversation{}).Where("id = ?", conv.ID).Update("last_msg_at", time.Now().UTC()).Error; err != nil {
+			return err
+		}
+		created = msg
+		return nil
+	})
+	return created, err
+}
+
+func (m *Module) enqueueSpeechSynthesis(msgID uint64, conv conversation, content string, voiceID string, speed, pitch float64, emotion *emotionMetadata) {
+	if m.tts == nil || !m.tts.Enabled() {
+		return
+	}
+
+	baseVoiceID := voiceID
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
+		defer cancel()
+
+		req := tts.SpeechRequest{
+			Text:    content,
+			VoiceID: baseVoiceID,
+			Speed:   speed,
+			Pitch:   pitch,
+		}
+		if emotion != nil {
+			req.Emotion = emotion.Label
+		}
+
+		result, err := m.tts.Synthesize(ctx, req)
+		status := "ready"
+		updates := make(map[string]any)
+		if err != nil {
+			status = "error"
+			updates["speech_error"] = err.Error()
+			log.Printf("llm: synthesize speech async failed: %v", err)
+		} else if result != nil {
+			updates["speech"] = result.AsMap()
+			if voiceID == "" {
+				voiceID = result.VoiceID
+			}
+		}
+		updates["speech_status"] = status
+
+		dbCtx, cancelDB := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelDB()
+
+		var msg message
+		if err := m.db.WithContext(dbCtx).First(&msg, "id = ?", msgID).Error; err != nil {
+			log.Printf("llm: load message for speech update failed: %v", err)
+			return
+		}
+
+		extrasMap := make(map[string]any)
+		if len(msg.Extras) > 0 {
+			if err := json.Unmarshal(msg.Extras, &extrasMap); err != nil {
+				log.Printf("llm: parse message extras failed: %v", err)
+				extrasMap = make(map[string]any)
+			}
+		}
+
+		for k, v := range updates {
+			extrasMap[k] = v
+		}
+		if voiceID != "" {
+			if prefs, ok := extrasMap["speech_preferences"].(map[string]any); ok {
+				if existing, ok := prefs["voice_id"].(string); !ok || strings.TrimSpace(existing) == "" {
+					prefs["voice_id"] = voiceID
+				}
+			}
+		}
+
+		raw, err := json.Marshal(extrasMap)
+		if err != nil {
+			log.Printf("llm: marshal extras after speech failed: %v", err)
+			return
+		}
+
+		if err := m.db.WithContext(dbCtx).Model(&message{}).Where("id = ?", msgID).Update("extras", datatypes.JSON(raw)).Error; err != nil {
+			log.Printf("llm: update message extras with speech failed: %v", err)
+			return
+		}
+	}()
+}
+
+func (m *Module) handleCreateMessageStream(
+	c *gin.Context,
+	conv conversation,
+	userMsg message,
+	userRecord messageRecord,
+	prefs speechPreferences,
+) {
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		assistantRecord, genErr := m.generateAssistantReply(c.Request.Context(), conv, userMsg, prefs)
+		response := createMessageResponse{
+			ConversationID: conv.ID,
+			AgentID:        conv.AgentID,
+			UserID:         conv.UserID,
+			UserMessage:    userRecord,
+		}
+		if genErr != nil {
+			response.AssistantError = genErr.Error()
+		} else if assistantRecord != nil {
+			response.AssistantMessage = assistantRecord
+		}
+		c.JSON(http.StatusCreated, response)
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	contextData, err := m.buildConversationContext(ctx, conv)
+	if err != nil {
+		c.Status(http.StatusInternalServerError)
+		_ = streamEvent(c.Writer, flusher, "error", gin.H{"error": err.Error()})
+		return
+	}
+
+	placeholder, err := m.createAssistantPlaceholder(ctx, conv, userMsg)
+	if err != nil {
+		c.Status(http.StatusInternalServerError)
+		_ = streamEvent(c.Writer, flusher, "error", gin.H{"error": "failed to prepare assistant message"})
+		return
+	}
+
+	assistantRecord := messageToRecord(placeholder, conv)
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache, no-transform")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Status(http.StatusCreated)
+	flusher.Flush()
+
+	if err := streamEvent(c.Writer, flusher, "user_message", userRecord); err != nil {
+		return
+	}
+	if err := streamEvent(c.Writer, flusher, "assistant_placeholder", assistantRecord); err != nil {
+		return
+	}
+
+	start := time.Now()
+
+	updateContent := func(content string) error {
+		return m.db.WithContext(ctx).
+			Model(&message{}).
+			Where("id = ?", placeholder.ID).
+			Update("content", content).
+			Error
+	}
+
+	streamHandler := func(delta ChatStreamDelta) error {
+		if delta.Content != "" {
+			if err := updateContent(delta.FullContent); err != nil {
+				return err
+			}
+		}
+		if delta.Content == "" && !delta.Done {
+			if delta.FinishReason == "" {
+				return nil
+			}
+		}
+		payload := gin.H{
+			"id":   placeholder.ID,
+			"full": delta.FullContent,
+		}
+		if delta.Content != "" {
+			payload["delta"] = delta.Content
+		}
+		if delta.FinishReason != "" {
+			payload["finish_reason"] = delta.FinishReason
+		}
+		if delta.Done {
+			payload["done"] = true
+		}
+		return streamEvent(c.Writer, flusher, "assistant_delta", payload)
+	}
+
+	reply, streamErr := m.client.ChatStream(ctx, contextData.messages, streamHandler)
+	if streamErr != nil {
+		log.Printf("llm: streaming fallback to non-streaming: %v", streamErr)
+		fullReply, err := m.client.Chat(ctx, contextData.messages)
+		if err != nil {
+			_ = streamEvent(c.Writer, flusher, "error", gin.H{"error": err.Error()})
+			return
+		}
+		reply = fullReply
+		if err := updateContent(reply); err != nil {
+			_ = streamEvent(c.Writer, flusher, "error", gin.H{"error": "failed to update assistant message"})
+			return
+		}
+		if err := streamHandler(ChatStreamDelta{Content: reply, FullContent: reply, Done: true}); err != nil {
+			return
+		}
+	}
+
+	if reply == "" {
+		var refreshed message
+		if err := m.db.WithContext(ctx).First(&refreshed, "id = ?", placeholder.ID).Error; err == nil {
+			reply = refreshed.Content
+			placeholder = refreshed
+		}
+	} else {
+		if err := m.db.WithContext(ctx).First(&placeholder, "id = ?", placeholder.ID).Error; err != nil {
+			log.Printf("llm: failed to reload assistant message: %v", err)
+		}
+	}
+
+	if reply == "" {
+		_ = streamEvent(c.Writer, flusher, "error", gin.H{"error": "assistant reply empty"})
+		return
+	}
+
+	latency := int(time.Since(start).Milliseconds())
+	if err := m.db.WithContext(ctx).
+		Model(&message{}).
+		Where("id = ?", placeholder.ID).
+		Update("latency_ms", latency).
+		Error; err != nil {
+		log.Printf("llm: failed to update latency: %v", err)
+	}
+
+	voiceID := resolveVoiceID(prefs.VoiceID, m.tts)
+	speed := sanitizeSpeed(prefs.Speed)
+	pitch := sanitizePitch(prefs.Pitch)
+	emotionMeta := inferEmotion(reply, prefs.EmotionHint)
+
+	extrasPayload := make(map[string]any)
+	if emotionMeta != nil {
+		extrasPayload["emotion"] = emotionMeta
+	}
+	if voiceID != "" || speed != 1.0 || pitch != 1.0 {
+		extrasPayload["speech_preferences"] = map[string]any{
+			"voice_id": voiceID,
+			"speed":    speed,
+			"pitch":    pitch,
+		}
+	}
+	speechEnabled := m.tts != nil && m.tts.Enabled()
+	if speechEnabled {
+		extrasPayload["speech_status"] = "pending"
+	}
+
+	if len(extrasPayload) > 0 {
+		if merged, err := mergeExtras(placeholder.Extras, extrasPayload); err != nil {
+			log.Printf("llm: merge extras failed: %v", err)
+		} else {
+			if err := m.db.WithContext(ctx).
+				Model(&message{}).
+				Where("id = ?", placeholder.ID).
+				Update("extras", merged).
+				Error; err != nil {
+				log.Printf("llm: failed to update extras: %v", err)
+			} else {
+				placeholder.Extras = merged
+			}
+		}
+	}
+
+	if err := m.db.WithContext(ctx).First(&placeholder, "id = ?", placeholder.ID).Error; err != nil {
+		_ = streamEvent(c.Writer, flusher, "error", gin.H{"error": "failed to reload assistant message"})
+		return
+	}
+
+	assistantRecord = messageToRecord(placeholder, conv)
+	if err := streamEvent(c.Writer, flusher, "assistant_message", assistantRecord); err != nil {
+		return
+	}
+
+	if speechEnabled {
+		m.enqueueSpeechSynthesis(placeholder.ID, conv, reply, voiceID, speed, pitch, emotionMeta)
+	}
+
+	_ = streamEvent(c.Writer, flusher, "done", gin.H{"id": placeholder.ID})
+}

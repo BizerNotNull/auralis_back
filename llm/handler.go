@@ -345,6 +345,11 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 		UserMessage:    userRecord,
 	}
 
+	if role == "user" && wantsEventStream(c) {
+		m.handleCreateMessageStream(c, conv, userMsg, userRecord, prefs)
+		return
+	}
+
 	if role == "user" {
 		assistantRecord, genErr := m.generateAssistantReply(ctx, conv, userMsg, prefs)
 		if genErr != nil {
@@ -376,49 +381,13 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 		return nil, errors.New("llm client not configured")
 	}
 
-	var agentModel agents.Agent
-	if err := m.db.WithContext(ctx).First(&agentModel, "id = ?", conv.AgentID).Error; err != nil {
-		return nil, fmt.Errorf("load agent: %w", err)
-	}
-
-	var cfg agents.AgentChatConfig
-	cfgErr := m.db.WithContext(ctx).First(&cfg, "agent_id = ?", conv.AgentID).Error
-	if cfgErr != nil && !errors.Is(cfgErr, gorm.ErrRecordNotFound) {
-		return nil, fmt.Errorf("load agent config: %w", cfgErr)
-	}
-
-	historyLimit := 20
-	var history []message
-	if err := m.db.WithContext(ctx).
-		Where("conversation_id = ?", conv.ID).
-		Order("seq ASC").
-		Limit(historyLimit).
-		Find(&history).Error; err != nil {
-		return nil, fmt.Errorf("load history: %w", err)
-	}
-
-	systemPrompt := buildSystemPrompt(&agentModel, func() *agents.AgentChatConfig {
-		if cfgErr == nil {
-			return &cfg
-		}
-		return nil
-	}())
-
-	messages := make([]ChatMessage, 0, len(history)+1)
-	if systemPrompt != "" {
-		messages = append(messages, ChatMessage{Role: "system", Content: systemPrompt})
-	}
-
-	for _, item := range history {
-		role := strings.ToLower(strings.TrimSpace(item.Role))
-		if role != "user" && role != "assistant" && role != "system" {
-			continue
-		}
-		messages = append(messages, ChatMessage{Role: role, Content: item.Content})
+	contextData, err := m.buildConversationContext(ctx, conv)
+	if err != nil {
+		return nil, err
 	}
 
 	start := time.Now()
-	reply, err := m.client.Chat(ctx, messages)
+	reply, err := m.client.Chat(ctx, contextData.messages)
 	if err != nil {
 		short := truncateString(err.Error(), 256)
 		_ = m.db.WithContext(ctx).Model(&message{}).Where("id = ?", userMsg.ID).Updates(map[string]any{
@@ -436,46 +405,20 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 	pitch := sanitizePitch(prefs.Pitch)
 	emotionMeta := inferEmotion(reply, prefs.EmotionHint)
 
-	var extrasPayload map[string]any
+	extrasPayload := make(map[string]any)
 	if emotionMeta != nil {
-		extrasPayload = map[string]any{
-			"emotion": emotionMeta,
-		}
+		extrasPayload["emotion"] = emotionMeta
 	}
-
-	if m.tts != nil && m.tts.Enabled() {
-		request := tts.SpeechRequest{
-			Text:    reply,
-			VoiceID: voiceID,
-			Emotion: "",
-			Speed:   speed,
-			Pitch:   pitch,
-		}
-		if emotionMeta != nil {
-			request.Emotion = emotionMeta.Label
-		}
-		if result, synthErr := m.tts.Synthesize(ctx, request); synthErr != nil {
-			log.Printf("llm: synthesize speech failed: %v", synthErr)
-		} else if result != nil {
-			if extrasPayload == nil {
-				extrasPayload = make(map[string]any)
-			}
-			extrasPayload["speech"] = result.AsMap()
-			if voiceID == "" {
-				voiceID = result.VoiceID
-			}
-		}
-	}
-
 	if voiceID != "" || speed != 1.0 || pitch != 1.0 {
-		if extrasPayload == nil {
-			extrasPayload = make(map[string]any)
-		}
 		extrasPayload["speech_preferences"] = map[string]any{
 			"voice_id": voiceID,
 			"speed":    speed,
 			"pitch":    pitch,
 		}
+	}
+	speechEnabled := m.tts != nil && m.tts.Enabled()
+	if speechEnabled {
+		extrasPayload["speech_status"] = "pending"
 	}
 
 	assistant := message{
@@ -485,15 +428,16 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 		Content:         reply,
 		ParentMessageID: &parentID,
 	}
-	if extrasPayload != nil {
+	if latency > 0 {
+		assistant.LatencyMs = &latency
+	}
+
+	if len(extrasPayload) > 0 {
 		if raw, marshalErr := json.Marshal(extrasPayload); marshalErr != nil {
 			log.Printf("llm: marshal message extras: %v", marshalErr)
 		} else {
 			assistant.Extras = datatypes.JSON(raw)
 		}
-	}
-	if latency > 0 {
-		assistant.LatencyMs = &latency
 	}
 
 	if err := m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -516,23 +460,10 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 		return nil, err
 	}
 
-	record := messageRecord{
-		ID:              assistant.ID,
-		ConversationID:  assistant.ConversationID,
-		AgentID:         conv.AgentID,
-		UserID:          conv.UserID,
-		Seq:             assistant.Seq,
-		Role:            assistant.Role,
-		Format:          assistant.Format,
-		Content:         assistant.Content,
-		ParentMessageID: assistant.ParentMessageID,
-		LatencyMs:       assistant.LatencyMs,
-		TokenInput:      assistant.TokenInput,
-		TokenOutput:     assistant.TokenOutput,
-		ErrCode:         assistant.ErrCode,
-		ErrMsg:          assistant.ErrMsg,
-		Extras:          toRawMessage(assistant.Extras),
-		CreatedAt:       assistant.CreatedAt,
+	record := messageToRecord(assistant, conv)
+
+	if speechEnabled {
+		m.enqueueSpeechSynthesis(assistant.ID, conv, reply, voiceID, speed, pitch, emotionMeta)
 	}
 
 	return &record, nil
