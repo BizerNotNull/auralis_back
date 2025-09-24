@@ -2,15 +2,19 @@ package llm
 
 import (
 	"auralis_back/agents"
+	"auralis_back/tts"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -24,10 +28,11 @@ var allowedMessageRoles = map[string]struct{}{
 type Module struct {
 	client *ChatClient
 	db     *gorm.DB
+	tts    tts.Synthesizer
 }
 
 // RegisterRoutes mounts the LLM testing endpoint under /llm.
-func RegisterRoutes(router *gin.Engine) (*Module, error) {
+func RegisterRoutes(router *gin.Engine, synthesizer tts.Synthesizer) (*Module, error) {
 	client, err := NewChatClientFromEnv()
 	if err != nil {
 		return nil, err
@@ -42,7 +47,7 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 		return nil, err
 	}
 
-	module := &Module{client: client, db: db}
+	module := &Module{client: client, db: db, tts: synthesizer}
 
 	group := router.Group("/llm")
 	group.POST("/complete", module.handleComplete)
@@ -81,21 +86,22 @@ func (m *Module) handleComplete(c *gin.Context) {
 }
 
 type messageRecord struct {
-	ID              uint64    `json:"id"`
-	ConversationID  uint64    `json:"conversation_id"`
-	AgentID         uint64    `json:"agent_id"`
-	UserID          uint64    `json:"user_id"`
-	Seq             int       `json:"seq"`
-	Role            string    `json:"role"`
-	Format          string    `json:"format"`
-	Content         string    `json:"content"`
-	ParentMessageID *uint64   `json:"parent_message_id,omitempty" gorm:"column:parent_msg_id"`
-	LatencyMs       *int      `json:"latency_ms,omitempty"`
-	TokenInput      *int      `json:"token_input,omitempty"`
-	TokenOutput     *int      `json:"token_output,omitempty"`
-	ErrCode         *string   `json:"err_code,omitempty"`
-	ErrMsg          *string   `json:"err_msg,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID              uint64          `json:"id"`
+	ConversationID  uint64          `json:"conversation_id"`
+	AgentID         uint64          `json:"agent_id"`
+	UserID          uint64          `json:"user_id"`
+	Seq             int             `json:"seq"`
+	Role            string          `json:"role"`
+	Format          string          `json:"format"`
+	Content         string          `json:"content"`
+	ParentMessageID *uint64         `json:"parent_message_id,omitempty" gorm:"column:parent_msg_id"`
+	LatencyMs       *int            `json:"latency_ms,omitempty"`
+	TokenInput      *int            `json:"token_input,omitempty"`
+	TokenOutput     *int            `json:"token_output,omitempty"`
+	ErrCode         *string         `json:"err_code,omitempty"`
+	ErrMsg          *string         `json:"err_msg,omitempty"`
+	Extras          json.RawMessage `json:"extras,omitempty" gorm:"column:extras"`
+	CreatedAt       time.Time       `json:"created_at"`
 }
 
 func (m *Module) handleRecentMessages(c *gin.Context) {
@@ -126,7 +132,7 @@ func (m *Module) handleRecentMessages(c *gin.Context) {
 	var records []messageRecord
 	tx := m.db.WithContext(c.Request.Context()).
 		Table("messages").
-		Select("messages.id, messages.conversation_id, conversations.agent_id, conversations.user_id, messages.seq, messages.role, messages.format, messages.content, messages.parent_msg_id, messages.latency_ms, messages.token_input, messages.token_output, messages.err_code, messages.err_msg, messages.created_at").
+		Select("messages.id, messages.conversation_id, conversations.agent_id, conversations.user_id, messages.seq, messages.role, messages.format, messages.content, messages.parent_msg_id, messages.latency_ms, messages.token_input, messages.token_output, messages.err_code, messages.err_msg, messages.extras, messages.created_at").
 		Joins("JOIN conversations ON conversations.id = messages.conversation_id").
 		Where("conversations.agent_id = ? AND conversations.user_id = ?", agentID, userID).
 		Order("messages.created_at DESC, messages.id DESC").
@@ -149,10 +155,29 @@ func (m *Module) handleRecentMessages(c *gin.Context) {
 }
 
 type createMessageRequest struct {
-	AgentID string `json:"agent_id" binding:"required"`
-	UserID  string `json:"user_id" binding:"required"`
-	Role    string `json:"role" binding:"required"`
-	Content string `json:"content" binding:"required"`
+	AgentID     string   `json:"agent_id" binding:"required"`
+	UserID      string   `json:"user_id" binding:"required"`
+	Role        string   `json:"role" binding:"required"`
+	Content     string   `json:"content" binding:"required"`
+	VoiceID     string   `json:"voice_id"`
+	EmotionHint string   `json:"emotion_hint"`
+	SpeechSpeed *float64 `json:"speech_speed,omitempty"`
+	SpeechPitch *float64 `json:"speech_pitch,omitempty"`
+}
+
+type speechPreferences struct {
+	VoiceID     string
+	EmotionHint string
+	Speed       float64
+	Pitch       float64
+}
+
+type emotionMetadata struct {
+	Label           string  `json:"label"`
+	Intensity       float64 `json:"intensity"`
+	Confidence      float64 `json:"confidence"`
+	Reason          string  `json:"reason,omitempty"`
+	SuggestedMotion string  `json:"suggested_motion,omitempty"`
 }
 
 type createMessageResponse struct {
@@ -198,6 +223,19 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 	if strings.TrimSpace(content) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "content cannot be empty"})
 		return
+	}
+
+	prefs := speechPreferences{
+		VoiceID:     strings.TrimSpace(req.VoiceID),
+		EmotionHint: strings.TrimSpace(req.EmotionHint),
+		Speed:       1.0,
+		Pitch:       1.0,
+	}
+	if req.SpeechSpeed != nil {
+		prefs.Speed = *req.SpeechSpeed
+	}
+	if req.SpeechPitch != nil {
+		prefs.Pitch = *req.SpeechPitch
 	}
 
 	ctx := c.Request.Context()
@@ -282,6 +320,7 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 			TokenOutput:     msg.TokenOutput,
 			ErrCode:         msg.ErrCode,
 			ErrMsg:          msg.ErrMsg,
+			Extras:          toRawMessage(msg.Extras),
 			CreatedAt:       msg.CreatedAt,
 		}
 
@@ -307,7 +346,7 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 	}
 
 	if role == "user" {
-		assistantRecord, genErr := m.generateAssistantReply(ctx, conv, userMsg)
+		assistantRecord, genErr := m.generateAssistantReply(ctx, conv, userMsg, prefs)
 		if genErr != nil {
 			response.AssistantError = genErr.Error()
 		} else if assistantRecord != nil {
@@ -332,7 +371,7 @@ func parsePositiveUint(value, field string) (uint64, error) {
 	return id, nil
 }
 
-func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, userMsg message) (*messageRecord, error) {
+func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, userMsg message, prefs speechPreferences) (*messageRecord, error) {
 	if m.client == nil {
 		return nil, errors.New("llm client not configured")
 	}
@@ -392,12 +431,66 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 	latency := int(time.Since(start).Milliseconds())
 	parentID := userMsg.ID
 
+	voiceID := resolveVoiceID(prefs.VoiceID, m.tts)
+	speed := sanitizeSpeed(prefs.Speed)
+	pitch := sanitizePitch(prefs.Pitch)
+	emotionMeta := inferEmotion(reply, prefs.EmotionHint)
+
+	var extrasPayload map[string]any
+	if emotionMeta != nil {
+		extrasPayload = map[string]any{
+			"emotion": emotionMeta,
+		}
+	}
+
+	if m.tts != nil && m.tts.Enabled() {
+		request := tts.SpeechRequest{
+			Text:    reply,
+			VoiceID: voiceID,
+			Emotion: "",
+			Speed:   speed,
+			Pitch:   pitch,
+		}
+		if emotionMeta != nil {
+			request.Emotion = emotionMeta.Label
+		}
+		if result, synthErr := m.tts.Synthesize(ctx, request); synthErr != nil {
+			log.Printf("llm: synthesize speech failed: %v", synthErr)
+		} else if result != nil {
+			if extrasPayload == nil {
+				extrasPayload = make(map[string]any)
+			}
+			extrasPayload["speech"] = result.AsMap()
+			if voiceID == "" {
+				voiceID = result.VoiceID
+			}
+		}
+	}
+
+	if voiceID != "" || speed != 1.0 || pitch != 1.0 {
+		if extrasPayload == nil {
+			extrasPayload = make(map[string]any)
+		}
+		extrasPayload["speech_preferences"] = map[string]any{
+			"voice_id": voiceID,
+			"speed":    speed,
+			"pitch":    pitch,
+		}
+	}
+
 	assistant := message{
 		ConversationID:  conv.ID,
 		Role:            "assistant",
 		Format:          "text",
 		Content:         reply,
 		ParentMessageID: &parentID,
+	}
+	if extrasPayload != nil {
+		if raw, marshalErr := json.Marshal(extrasPayload); marshalErr != nil {
+			log.Printf("llm: marshal message extras: %v", marshalErr)
+		} else {
+			assistant.Extras = datatypes.JSON(raw)
+		}
 	}
 	if latency > 0 {
 		assistant.LatencyMs = &latency
@@ -438,6 +531,7 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 		TokenOutput:     assistant.TokenOutput,
 		ErrCode:         assistant.ErrCode,
 		ErrMsg:          assistant.ErrMsg,
+		Extras:          toRawMessage(assistant.Extras),
 		CreatedAt:       assistant.CreatedAt,
 	}
 
@@ -487,4 +581,194 @@ func truncateString(value string, max int) string {
 		return value[:max]
 	}
 	return value[:max-3] + "..."
+}
+
+func toRawMessage(data datatypes.JSON) json.RawMessage {
+	if len(data) == 0 {
+		return nil
+	}
+	clone := make([]byte, len(data))
+	copy(clone, data)
+	return json.RawMessage(clone)
+}
+
+func resolveVoiceID(candidate string, synth tts.Synthesizer) string {
+	trimmed := strings.TrimSpace(candidate)
+	if trimmed != "" {
+		return trimmed
+	}
+	if synth != nil {
+		if voice := strings.TrimSpace(synth.DefaultVoiceID()); voice != "" {
+			return voice
+		}
+		if voices := synth.Voices(); len(voices) > 0 {
+			return strings.TrimSpace(voices[0].ID)
+		}
+	}
+	return ""
+}
+
+func sanitizeSpeed(value float64) float64 {
+	if value <= 0 {
+		return 1.0
+	}
+	if value < 0.5 {
+		return 0.5
+	}
+	if value > 1.6 {
+		return 1.6
+	}
+	return value
+}
+
+func sanitizePitch(value float64) float64 {
+	if value <= 0 {
+		return 1.0
+	}
+	if value < 0.7 {
+		return 0.7
+	}
+	if value > 1.4 {
+		return 1.4
+	}
+	return value
+}
+
+func clampFloat(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func normalizeEmotionLabel(value string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(value))
+	switch trimmed {
+	case "", "neutral", "平静", "calm", "默认":
+		return "neutral"
+	case "开心", "高兴", "喜悦", "太棒了", "happy", "cheerful":
+		return "happy"
+	case "sad", "难过", "伤心", "悲伤", "遗憾":
+		return "sad"
+	case "angry", "生气", "愤怒", "怒火":
+		return "angry"
+	case "surprised", "惊讶", "惊喜", "没想到":
+		return "surprised"
+	case "坚定", "自信", "confident":
+		return "confident"
+	case "温柔", "gentle", "soft":
+		return "gentle"
+	default:
+		return trimmed
+	}
+}
+
+func motionForEmotion(label string, intensity float64) string {
+	switch label {
+	case "happy":
+		if intensity > 0.6 {
+			return "happy_jump"
+		}
+		return "happy_smile"
+	case "sad":
+		if intensity > 0.6 {
+			return "sad_drop"
+		}
+		return "sad_idle"
+	case "angry":
+		if intensity > 0.6 {
+			return "angry_point"
+		}
+		return "angry_idle"
+	case "surprised":
+		return "surprised_react"
+	case "confident":
+		return "pose_proud"
+	case "gentle":
+		return "gentle_wave"
+	default:
+		if intensity > 0.5 {
+			return "idle_emphatic"
+		}
+		return "idle_breathe"
+	}
+}
+
+func inferEmotion(text, hint string) *emotionMetadata {
+	trimmed := strings.TrimSpace(text)
+	normalizedHint := normalizeEmotionLabel(hint)
+	if trimmed == "" && normalizedHint == "" {
+		return nil
+	}
+	lowerText := strings.ToLower(trimmed)
+	label := normalizedHint
+	reasons := make([]string, 0, 3)
+	if normalizedHint != "" {
+		reasons = append(reasons, "hint:"+normalizedHint)
+	}
+	keywordSets := map[string][]string{
+		"happy":     {"开心", "高兴", "喜悦", "太棒了", "amazing", "great", "wonderful"},
+		"sad":       {"难过", "伤心", "悲伤", "遗憾", "unfortunate", "sad"},
+		"angry":     {"生气", "愤怒", "气死", "annoyed", "frustrated"},
+		"surprised": {"惊讶", "惊喜", "没想到", "surprise", "wow"},
+		"gentle":    {"温柔", "放松", "calm", "轻声"},
+		"confident": {"坚定", "自信", "相信", "confident"},
+	}
+	for candidate, words := range keywordSets {
+		for _, word := range words {
+			if word == "" {
+				continue
+			}
+			if strings.Contains(trimmed, word) || strings.Contains(lowerText, strings.ToLower(word)) {
+				label = candidate
+				reasons = append(reasons, "keyword:"+word)
+				break
+			}
+		}
+		if label == candidate {
+			break
+		}
+	}
+	if label == "" {
+		label = "neutral"
+	}
+	intensity := 0.35
+	confidence := 0.35
+	exclamations := strings.Count(trimmed, "!")
+	questionMarks := strings.Count(trimmed, "?")
+	ellipsis := strings.Count(trimmed, "...") + strings.Count(trimmed, "…")
+	if label == "happy" {
+		intensity += float64(exclamations) * 0.08
+	}
+	if label == "sad" {
+		intensity += float64(ellipsis) * 0.05
+	}
+	if label == "angry" {
+		intensity += float64(exclamations) * 0.1
+	}
+	if label == "surprised" {
+		intensity += float64(questionMarks) * 0.05
+	}
+	if strings.Contains(trimmed, "!!!") {
+		intensity += 0.15
+	}
+	if len(reasons) > 0 {
+		confidence += 0.2
+	}
+	intensity = clampFloat(intensity, 0.2, 1.0)
+	confidence = clampFloat(confidence, 0.2, 0.95)
+	if label == "neutral" {
+		intensity = clampFloat(intensity, 0.2, 0.5)
+	}
+	reasonText := strings.Join(reasons, "; ")
+	return &emotionMetadata{
+		Label:           label,
+		Intensity:       intensity,
+		Confidence:      confidence,
+		Reason:          reasonText,
+		SuggestedMotion: motionForEmotion(label, intensity),
+	}
 }

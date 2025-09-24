@@ -1,9 +1,11 @@
 package agents
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"strconv"
@@ -20,6 +22,34 @@ type Module struct {
 	db             *gorm.DB
 	avatars        *avatarStorage
 	authMiddleware gin.HandlerFunc
+}
+
+const avatarURLExpiry = 15 * time.Minute
+
+func (m *Module) applyAvatarURL(ctx context.Context, agent *Agent) {
+	if m == nil || agent == nil || agent.AvatarURL == nil {
+		return
+	}
+
+	trimmed := strings.TrimSpace(*agent.AvatarURL)
+	if trimmed == "" {
+		agent.AvatarURL = nil
+		return
+	}
+
+	*agent.AvatarURL = trimmed
+
+	if m.avatars == nil {
+		return
+	}
+
+	signed, err := m.avatars.PresignedURL(ctx, trimmed, avatarURLExpiry)
+	if err != nil {
+		log.Printf("agents: presign avatar url failed: %v", err)
+		return
+	}
+
+	*agent.AvatarURL = signed
 }
 
 func RegisterRoutes(router *gin.Engine, authMiddleware gin.HandlerFunc) (*Module, error) {
@@ -214,6 +244,8 @@ func (m *Module) handleCreateAgent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load agent", "details": err.Error()})
 		return
 	}
+
+	m.applyAvatarURL(ctx, &agent)
 
 	if err := m.db.WithContext(ctx).First(&cfg, "agent_id = ?", agent.ID).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load agent config", "details": err.Error()})
@@ -482,6 +514,8 @@ func (m *Module) handleUpdateAgent(c *gin.Context) {
 		return
 	}
 
+	m.applyAvatarURL(ctx, &agent)
+
 	var updatedCfg AgentChatConfig
 	if err := m.db.WithContext(ctx).First(&updatedCfg, "agent_id = ?", agentID).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load agent config", "details": err.Error()})
@@ -502,8 +536,9 @@ func (m *Module) handleListAgents(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
 	status := strings.TrimSpace(c.Query("status"))
-	query := m.db.WithContext(c.Request.Context())
+	query := m.db.WithContext(ctx)
 	if status != "" {
 		query = query.Where("status = ?", status)
 	} else {
@@ -514,6 +549,10 @@ func (m *Module) handleListAgents(c *gin.Context) {
 	if err := query.Order("updated_at DESC").Find(&agents).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list agents", "details": err.Error()})
 		return
+	}
+
+	for i := range agents {
+		m.applyAvatarURL(ctx, &agents[i])
 	}
 
 	c.JSON(http.StatusOK, gin.H{"agents": agents})
@@ -542,6 +581,8 @@ func (m *Module) handleGetAgent(c *gin.Context) {
 		}
 		return
 	}
+
+	m.applyAvatarURL(ctx, &agent)
 
 	var cfg AgentChatConfig
 	if err := m.db.WithContext(ctx).First(&cfg, "agent_id = ?", id).Error; err != nil {

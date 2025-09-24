@@ -182,7 +182,52 @@ func (s *avatarStorage) objectNameFromURL(raw string) (string, bool) {
 		}
 	}
 
+	if !strings.Contains(trimmed, "://") {
+		candidate := strings.TrimPrefix(trimmed, "/")
+		candidate = strings.TrimPrefix(candidate, s.bucket+"/")
+		candidate = strings.TrimPrefix(candidate, "/")
+		if candidate != "" {
+			return candidate, true
+		}
+	}
+
 	return "", false
+}
+
+func (s *avatarStorage) PresignedURL(ctx context.Context, raw string, expiry time.Duration) (string, error) {
+	if s == nil || s.client == nil {
+		return strings.TrimSpace(raw), nil
+	}
+
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+
+	if expiry <= 0 {
+		expiry = 15 * time.Minute
+	}
+
+	objectName, ok := s.objectNameFromURL(trimmed)
+	if !ok {
+		if !strings.Contains(trimmed, "://") {
+			objectName = strings.TrimPrefix(trimmed, "/")
+			objectName = strings.TrimPrefix(objectName, s.bucket+"/")
+		}
+	}
+	if objectName == "" {
+		return trimmed, nil
+	}
+
+	presignCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	url, err := s.client.PresignedGetObject(presignCtx, s.bucket, objectName, expiry, nil)
+	if err != nil {
+		return "", err
+	}
+
+	return url.String(), nil
 }
 
 func isAllowedAvatarContent(contentType string) bool {
