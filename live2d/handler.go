@@ -12,16 +12,15 @@ import (
 	"unicode"
 
 	"auralis_back/agents"
-	jwt "github.com/appleboy/gin-jwt/v2"
+	"auralis_back/authorization"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
 type Module struct {
-	db             *gorm.DB
-	storage        *assetStorage
-	authMiddleware gin.HandlerFunc
+	db      *gorm.DB
+	storage *assetStorage
 }
 
 type createModelForm struct {
@@ -45,7 +44,7 @@ type modelDTO struct {
 	UpdatedAt   int64   `json:"updated_at"`
 }
 
-func RegisterRoutes(router *gin.Engine, authMiddleware gin.HandlerFunc) (*Module, error) {
+func RegisterRoutes(router *gin.Engine, guard *authorization.Guard) (*Module, error) {
 	db, err := openDatabaseFromEnv()
 	if err != nil {
 		return nil, err
@@ -60,7 +59,7 @@ func RegisterRoutes(router *gin.Engine, authMiddleware gin.HandlerFunc) (*Module
 		return nil, err
 	}
 
-	module := &Module{db: db, storage: storage, authMiddleware: authMiddleware}
+	module := &Module{db: db, storage: storage}
 
 	group := router.Group("/live2d/models")
 	group.GET("", module.handleListModels)
@@ -68,10 +67,13 @@ func RegisterRoutes(router *gin.Engine, authMiddleware gin.HandlerFunc) (*Module
 	group.GET("/:id/files/*filepath", module.handleServeFile)
 
 	admin := group.Group("")
-	if authMiddleware != nil {
-		admin.Use(authMiddleware)
+	if guard != nil {
+		admin.Use(guard.RequireAuthenticated(), guard.RequireRole("admin"))
+	} else {
+		admin.Use(func(c *gin.Context) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authorization middleware missing"})
+		})
 	}
-	admin.Use(requireRole("admin"))
 	admin.POST("", module.handleCreateModel)
 	admin.DELETE("/:id", module.handleDeleteModel)
 
@@ -425,77 +427,4 @@ func isValidURL(raw string) bool {
 		return false
 	}
 	return true
-}
-
-func requireRole(role string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if strings.TrimSpace(role) == "" {
-			c.Next()
-			return
-		}
-
-		claims := jwt.ExtractClaims(c)
-		if len(claims) == 0 {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
-			return
-		}
-
-		roles := extractRoles(claims["roles"])
-		if !hasRole(roles, role) {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient privileges"})
-			return
-		}
-
-		c.Next()
-	}
-}
-
-func extractRoles(value interface{}) []string {
-	switch v := value.(type) {
-	case []string:
-		result := make([]string, 0, len(v))
-		for _, role := range v {
-			trimmed := strings.ToLower(strings.TrimSpace(role))
-			if trimmed != "" {
-				result = append(result, trimmed)
-			}
-		}
-		return result
-	case []interface{}:
-		result := make([]string, 0, len(v))
-		for _, item := range v {
-			if str, ok := item.(string); ok {
-				trimmed := strings.ToLower(strings.TrimSpace(str))
-				if trimmed != "" {
-					result = append(result, trimmed)
-				}
-			}
-		}
-		return result
-	case string:
-		parts := strings.Split(v, ",")
-		result := make([]string, 0, len(parts))
-		for _, part := range parts {
-			trimmed := strings.ToLower(strings.TrimSpace(part))
-			if trimmed != "" {
-				result = append(result, trimmed)
-			}
-		}
-		return result
-	default:
-		return nil
-	}
-}
-
-func hasRole(roles []string, role string) bool {
-	target := strings.ToLower(strings.TrimSpace(role))
-	if target == "" {
-		return false
-	}
-	for _, candidate := range roles {
-		if strings.ToLower(strings.TrimSpace(candidate)) == target {
-			return true
-		}
-	}
-	return false
 }

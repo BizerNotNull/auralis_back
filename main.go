@@ -60,15 +60,15 @@ func main() {
 		log.Fatalf("register auth routes: %v", err)
 	}
 
-	var authMiddleware gin.HandlerFunc
+	var authGuard *authorization.Guard
 	if authModule != nil {
-		authMiddleware = authModule.Middleware()
+		authGuard = authModule.Guard()
 	}
 
-	if _, err := agents.RegisterRoutes(r, authMiddleware); err != nil {
+	if _, err := agents.RegisterRoutes(r, authGuard); err != nil {
 		log.Fatalf("register agent routes: %v", err)
 	}
-	if _, err := live2d.RegisterRoutes(r, authMiddleware); err != nil {
+	if _, err := live2d.RegisterRoutes(r, authGuard); err != nil {
 		log.Fatalf("register live2d routes: %v", err)
 	}
 	ttsModule, err := tts.RegisterRoutes(r)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/mail"
 	"os"
 	"strings"
 	"time"
@@ -33,6 +34,9 @@ var (
 	ErrUsernameTaken      = errors.New("authorization: username already exists")
 	ErrWeakPassword       = errors.New("authorization: password must be at least 6 characters")
 	ErrInvalidDisplayName = errors.New("authorization: display name cannot be empty")
+	ErrInvalidNickname    = errors.New("authorization: nickname cannot be empty")
+	ErrInvalidEmail       = errors.New("authorization: invalid email address")
+	ErrEmailTaken         = errors.New("authorization: email already exists")
 )
 
 // Module wires together the JWT middleware and backing services.
@@ -92,10 +96,10 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 			}
 		}
 		c.JSON(http.StatusOK, gin.H{
-			"captcha_id": challenge.ID,
-			"question":   challenge.Question,
-			"expires_in": expiresIn,
-			"expires_at": challenge.ExpiresAt.UTC(),
+			"captcha_id":   challenge.ID,
+			"image_base64": challenge.ImageBase64,
+			"expires_in":   expiresIn,
+			"expires_at":   challenge.ExpiresAt.UTC(),
 		})
 	})
 	authGroup.POST("/register", func(c *gin.Context) {
@@ -110,21 +114,34 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 			return
 		}
 
+		nickname := strings.TrimSpace(req.Nickname)
+		email := strings.TrimSpace(req.Email)
+
 		displayName := strings.TrimSpace(req.DisplayName)
 		if displayName == "" {
-			displayName = req.Username
+			if nickname != "" {
+				displayName = nickname
+			} else {
+				displayName = req.Username
+			}
 		}
 
 		ctx := c.Request.Context()
-		user, err := authService.Register(ctx, req.Username, req.Password, displayName, req.AvatarURL, req.Bio)
+		user, err := authService.Register(ctx, req.Username, req.Password, displayName, nickname, email, req.AvatarURL, req.Bio)
 		if err != nil {
 			switch {
 			case errors.Is(err, jwt.ErrMissingLoginValues):
 				c.JSON(http.StatusBadRequest, gin.H{"error": "username and password are required"})
 			case errors.Is(err, ErrWeakPassword):
 				c.JSON(http.StatusBadRequest, gin.H{"error": ErrWeakPassword.Error()})
+			case errors.Is(err, ErrInvalidNickname):
+				c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidNickname.Error()})
+			case errors.Is(err, ErrInvalidEmail):
+				c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidEmail.Error()})
 			case errors.Is(err, ErrUsernameTaken):
 				c.JSON(http.StatusConflict, gin.H{"error": "username already exists"})
+			case errors.Is(err, ErrEmailTaken):
+				c.JSON(http.StatusConflict, gin.H{"error": "email already exists"})
 			default:
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to register"})
 			}
@@ -203,7 +220,7 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
 			return
 		}
-		if req.DisplayName == nil && req.AvatarURL == nil && req.Bio == nil {
+		if req.DisplayName == nil && req.AvatarURL == nil && req.Bio == nil && req.Nickname == nil && req.Email == nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
 			return
 		}
@@ -218,6 +235,8 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 		ctx := c.Request.Context()
 		updated, err := userStore.UpdateProfile(ctx, userID, UpdateProfileParams{
 			DisplayName: req.DisplayName,
+			Nickname:    req.Nickname,
+			Email:       req.Email,
 			AvatarURL:   req.AvatarURL,
 			Bio:         req.Bio,
 		})
@@ -225,6 +244,12 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 			switch {
 			case errors.Is(err, ErrInvalidDisplayName):
 				c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidDisplayName.Error()})
+			case errors.Is(err, ErrInvalidNickname):
+				c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidNickname.Error()})
+			case errors.Is(err, ErrInvalidEmail):
+				c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidEmail.Error()})
+			case errors.Is(err, ErrEmailTaken):
+				c.JSON(http.StatusConflict, gin.H{"error": "email already exists"})
 			case errors.Is(err, gorm.ErrRecordNotFound):
 				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 			default:
@@ -484,6 +509,8 @@ type RegisterRequest struct {
 	Username      string  `json:"username" binding:"required"`
 	Password      string  `json:"password" binding:"required,min=6"`
 	DisplayName   string  `json:"display_name"`
+	Nickname      string  `json:"nickname" binding:"required"`
+	Email         string  `json:"email" binding:"required,email"`
 	CaptchaID     string  `json:"captcha_id" binding:"required"`
 	CaptchaAnswer string  `json:"captcha_answer" binding:"required"`
 	AvatarURL     *string `json:"avatar_url"`
@@ -493,6 +520,8 @@ type RegisterRequest struct {
 // UpdateProfileRequest captures profile update fields.
 type UpdateProfileRequest struct {
 	DisplayName *string `json:"display_name"`
+	Nickname    *string `json:"nickname"`
+	Email       *string `json:"email" binding:"omitempty,email"`
 	AvatarURL   *string `json:"avatar_url"`
 	Bio         *string `json:"bio"`
 }
@@ -536,10 +565,12 @@ func (s *AuthService) Authenticate(ctx context.Context, username, password strin
 }
 
 // Register creates a new user with the provided credentials.
-func (s *AuthService) Register(ctx context.Context, username, password, displayName string, avatarURL, bio *string) (*User, error) {
+func (s *AuthService) Register(ctx context.Context, username, password, displayName, nickname, email string, avatarURL, bio *string) (*User, error) {
 	username = strings.TrimSpace(username)
 	password = strings.TrimSpace(password)
 	displayName = strings.TrimSpace(displayName)
+	nickname = strings.TrimSpace(nickname)
+	email = strings.TrimSpace(email)
 
 	if username == "" || password == "" {
 		return nil, jwt.ErrMissingLoginValues
@@ -547,8 +578,16 @@ func (s *AuthService) Register(ctx context.Context, username, password, displayN
 	if len(password) < 6 {
 		return nil, ErrWeakPassword
 	}
+	if nickname == "" {
+		return nil, ErrInvalidNickname
+	}
 	if displayName == "" {
-		displayName = username
+		displayName = nickname
+	}
+
+	normalizedEmail, err := normalizeEmail(email)
+	if err != nil {
+		return nil, err
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -576,11 +615,16 @@ func (s *AuthService) Register(ctx context.Context, username, password, displayN
 		Username:     username,
 		PasswordHash: string(hash),
 		DisplayName:  displayName,
+		Nickname:     nickname,
+		Email:        normalizedEmail,
 		AvatarURL:    storedAvatar,
 		Bio:          storedBio,
 	}
 	if err := s.users.Create(ctx, user); err != nil {
 		if errors.Is(err, gorm.ErrDuplicatedKey) {
+			if isDuplicateEmailError(err) {
+				return nil, ErrEmailTaken
+			}
 			return nil, ErrUsernameTaken
 		}
 		return nil, fmt.Errorf("authorization: create user: %w", err)
@@ -597,6 +641,8 @@ type UserStore struct {
 // UpdateProfileParams holds the fields eligible for profile updates.
 type UpdateProfileParams struct {
 	DisplayName *string
+	Nickname    *string
+	Email       *string
 	AvatarURL   *string
 	Bio         *string
 }
@@ -634,7 +680,7 @@ func (s *UserStore) FindRoleNames(ctx context.Context, userID uint) ([]string, e
 	var roles []string
 	err := s.db.WithContext(ctx).
 		Model(&Role{}).
-		Select("roles.name").
+		Select("roles.code").
 		Joins("JOIN user_roles ON user_roles.role_id = roles.id").
 		Where("user_roles.user_id = ?", userID).
 		Scan(&roles).Error
@@ -644,7 +690,16 @@ func (s *UserStore) FindRoleNames(ctx context.Context, userID uint) ([]string, e
 		}
 		return nil, err
 	}
-	return roles, nil
+
+	normalized := make([]string, 0, len(roles))
+	for _, role := range roles {
+		trimmed := strings.TrimSpace(role)
+		if trimmed == "" {
+			continue
+		}
+		normalized = append(normalized, strings.ToLower(trimmed))
+	}
+	return normalized, nil
 }
 
 // UpdateProfile persists profile related fields for the given user id.
@@ -661,6 +716,22 @@ func (s *UserStore) UpdateProfile(ctx context.Context, userID uint, params Updat
 			return nil, ErrInvalidDisplayName
 		}
 		updates["display_name"] = name
+	}
+
+	if params.Nickname != nil {
+		nickname := strings.TrimSpace(*params.Nickname)
+		if nickname == "" {
+			return nil, ErrInvalidNickname
+		}
+		updates["nickname"] = nickname
+	}
+
+	if params.Email != nil {
+		normalizedEmail, err := normalizeEmail(*params.Email)
+		if err != nil {
+			return nil, err
+		}
+		updates["email"] = normalizedEmail
 	}
 
 	if params.AvatarURL != nil {
@@ -688,6 +759,9 @@ func (s *UserStore) UpdateProfile(ctx context.Context, userID uint, params Updat
 	updates["updated_at"] = time.Now().UTC()
 	result := s.db.WithContext(ctx).Model(&User{}).Where("id = ?", userID).Updates(updates)
 	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrDuplicatedKey) && isDuplicateEmailError(result.Error) {
+			return nil, ErrEmailTaken
+		}
 		return nil, result.Error
 	}
 	if result.RowsAffected == 0 {
@@ -703,6 +777,8 @@ type User struct {
 	Username     string  `gorm:"uniqueIndex;size:64;not null"`
 	PasswordHash string  `gorm:"size:255;not null"`
 	DisplayName  string  `gorm:"size:128;not null;default:''"`
+	Nickname     string  `gorm:"size:64;not null"`
+	Email        string  `gorm:"uniqueIndex;size:128;not null"`
 	AvatarURL    *string `gorm:"size:255"`
 	Bio          *string `gorm:"type:text"`
 	Status       string  `gorm:"size:32;default:'active'"`
@@ -811,6 +887,8 @@ func buildUserPayload(ctx context.Context, store *filestore.AvatarStorage, user 
 		"id":            user.ID,
 		"username":      user.Username,
 		"display_name":  user.DisplayName,
+		"nickname":      user.Nickname,
+		"email":         user.Email,
 		"avatar_url":    avatarField,
 		"bio":           bioField,
 		"status":        user.Status,
@@ -819,4 +897,28 @@ func buildUserPayload(ctx context.Context, store *filestore.AvatarStorage, user 
 		"updated_at":    user.UpdatedAt,
 		"roles":         roles,
 	}
+}
+func normalizeEmail(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", ErrInvalidEmail
+	}
+
+	parsed, err := mail.ParseAddress(trimmed)
+	if err != nil || parsed.Address == "" {
+		return "", ErrInvalidEmail
+	}
+
+	return strings.ToLower(parsed.Address), nil
+}
+
+func isDuplicateEmailError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "idx_users_email") ||
+		strings.Contains(message, "users.email") ||
+		strings.Contains(message, "users_email")
 }

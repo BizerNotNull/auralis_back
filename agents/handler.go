@@ -6,12 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"mime/multipart"
 	"net/http"
+	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"auralis_back/authorization"
 	filestore "auralis_back/storage"
 	jwt "github.com/appleboy/gin-jwt/v2"
 	"github.com/gin-gonic/gin"
@@ -20,12 +24,29 @@ import (
 )
 
 type Module struct {
-	db             *gorm.DB
-	avatars        *filestore.AvatarStorage
-	authMiddleware gin.HandlerFunc
+	db            *gorm.DB
+	avatars       *filestore.AvatarStorage
+	reviewEnabled bool
 }
 
 const avatarURLExpiry = 15 * time.Minute
+
+const (
+	statusPending  = "pending"
+	statusActive   = "active"
+	statusRejected = "rejected"
+	statusPaused   = "paused"
+	statusArchived = "archived"
+
+	claimUserIDKey = "user_id"
+	claimRolesKey  = "roles"
+)
+
+const (
+	defaultRatingsPageSize = 10
+	maxRatingsPageSize     = 50
+	maxListLimit           = 100
+)
 
 func (m *Module) applyAvatarURL(ctx context.Context, agent *Agent) {
 	if m == nil || agent == nil || agent.AvatarURL == nil {
@@ -53,13 +74,40 @@ func (m *Module) applyAvatarURL(ctx context.Context, agent *Agent) {
 	*agent.AvatarURL = signed
 }
 
-func RegisterRoutes(router *gin.Engine, authMiddleware gin.HandlerFunc) (*Module, error) {
+func parseEnvBool(key string) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return false, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("invalid boolean value %q", raw)
+	}
+	return value, nil
+}
+
+func (m *Module) reviewRequired() bool {
+	if m == nil {
+		return false
+	}
+	raw := strings.TrimSpace(os.Getenv("AGENT_REVIEW_ENABLED"))
+	if raw == "" {
+		return m.reviewEnabled
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return m.reviewEnabled
+	}
+	return value
+}
+
+func RegisterRoutes(router *gin.Engine, guard *authorization.Guard) (*Module, error) {
 	db, err := openDatabaseFromEnv()
 	if err != nil {
 		return nil, err
 	}
 
-	if err := db.AutoMigrate(&Agent{}, &AgentChatConfig{}); err != nil {
+	if err := db.AutoMigrate(&Agent{}, &AgentChatConfig{}, &AgentRating{}); err != nil {
 		return nil, err
 	}
 
@@ -68,68 +116,97 @@ func RegisterRoutes(router *gin.Engine, authMiddleware gin.HandlerFunc) (*Module
 		return nil, err
 	}
 
-	module := &Module{db: db, avatars: avatarStore, authMiddleware: authMiddleware}
+	reviewEnabled, err := parseEnvBool("AGENT_REVIEW_ENABLED")
+	if err != nil {
+		log.Printf("agents: invalid AGENT_REVIEW_ENABLED value: %v", err)
+	}
+
+	module := &Module{db: db, avatars: avatarStore, reviewEnabled: reviewEnabled}
 
 	group := router.Group("/agents")
 	group.GET("", module.handleListAgents)
-	group.POST("", module.handleCreateAgent)
 	group.GET("/:id", module.handleGetAgent)
 	group.POST("/:id/conversations", module.handleCreateConversation)
 	group.DELETE("/:id/conversations", module.handleClearConversation)
+	group.GET("/:id/ratings", module.handleGetRatings)
+	group.PUT("/:id/ratings", module.handleUpsertRating)
 
-	adminGroup := group.Group("")
-	if authMiddleware != nil {
-		adminGroup.Use(authMiddleware)
+	authGroup := group.Group("")
+	if guard != nil {
+		authGroup.Use(guard.RequireAuthenticated())
+	} else {
+		authGroup.Use(func(c *gin.Context) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authorization middleware missing"})
+		})
 	}
-	adminGroup.Use(requireRole("admin"))
-	adminGroup.PUT("/:id", module.handleUpdateAgent)
+	authGroup.POST("", module.handleCreateAgent)
+	authGroup.GET("/mine", module.handleListMyAgents)
+	authGroup.PUT("/:id", module.handleUpdateAgent)
+
+	adminGroup := router.Group("/admin/agents")
+	if guard != nil {
+		adminGroup.Use(guard.RequireAuthenticated(), guard.RequireRole("admin"))
+	} else {
+		adminGroup.Use(func(c *gin.Context) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authorization middleware missing"})
+		})
+	}
+	adminGroup.GET("", module.handleAdminListAgents)
 
 	return module, nil
 }
 
 type createAgentRequest struct {
-	Name           string   `json:"name" binding:"required"`
-	Gender         string   `json:"gender"`
-	TitleAddress   *string  `json:"title_address"`
-	PersonaDesc    *string  `json:"persona_desc"`
-	OpeningLine    *string  `json:"opening_line"`
-	FirstTurnHint  *string  `json:"first_turn_hint"`
-	Live2DModelID  *string  `json:"live2d_model_id"`
-	LangDefault    string   `json:"lang_default"`
-	Tags           []string `json:"tags"`
-	Notes          *string  `json:"notes"`
-	ModelProvider  string   `json:"model_provider" binding:"required"`
-	ModelName      string   `json:"model_name" binding:"required"`
-	ResponseFormat string   `json:"response_format"`
-	Temperature    *float64 `json:"temperature"`
-	MaxTokens      *int     `json:"max_tokens"`
-	SystemPrompt   *string  `json:"system_prompt"`
+	Name             string   `json:"name" binding:"required"`
+	Gender           string   `json:"gender"`
+	TitleAddress     *string  `json:"title_address"`
+	OneSentenceIntro *string  `json:"one_sentence_intro"`
+	PersonaDesc      *string  `json:"persona_desc"`
+	OpeningLine      *string  `json:"opening_line"`
+	FirstTurnHint    *string  `json:"first_turn_hint"`
+	Live2DModelID    *string  `json:"live2d_model_id"`
+	LangDefault      string   `json:"lang_default"`
+	Tags             []string `json:"tags"`
+	Notes            *string  `json:"notes"`
+	ModelProvider    string   `json:"model_provider" binding:"required"`
+	ModelName        string   `json:"model_name" binding:"required"`
+	ResponseFormat   string   `json:"response_format"`
+	Temperature      *float64 `json:"temperature"`
+	MaxTokens        *int     `json:"max_tokens"`
+	SystemPrompt     *string  `json:"system_prompt"`
 }
 
 type updateAgentRequest struct {
-	Name           *string   `json:"name"`
-	Gender         *string   `json:"gender"`
-	TitleAddress   *string   `json:"title_address"`
-	PersonaDesc    *string   `json:"persona_desc"`
-	OpeningLine    *string   `json:"opening_line"`
-	FirstTurnHint  *string   `json:"first_turn_hint"`
-	Live2DModelID  *string   `json:"live2d_model_id"`
-	LangDefault    *string   `json:"lang_default"`
-	Tags           *[]string `json:"tags"`
-	Notes          *string   `json:"notes"`
-	ModelProvider  *string   `json:"model_provider"`
-	ModelName      *string   `json:"model_name"`
-	ResponseFormat *string   `json:"response_format"`
-	Temperature    *float64  `json:"temperature"`
-	MaxTokens      *int      `json:"max_tokens"`
-	SystemPrompt   *string   `json:"system_prompt"`
-	Status         *string   `json:"status"`
-	RemoveAvatar   *bool     `json:"remove_avatar"`
+	Name             *string   `json:"name"`
+	Gender           *string   `json:"gender"`
+	TitleAddress     *string   `json:"title_address"`
+	OneSentenceIntro *string   `json:"one_sentence_intro"`
+	PersonaDesc      *string   `json:"persona_desc"`
+	OpeningLine      *string   `json:"opening_line"`
+	FirstTurnHint    *string   `json:"first_turn_hint"`
+	Live2DModelID    *string   `json:"live2d_model_id"`
+	LangDefault      *string   `json:"lang_default"`
+	Tags             *[]string `json:"tags"`
+	Notes            *string   `json:"notes"`
+	ModelProvider    *string   `json:"model_provider"`
+	ModelName        *string   `json:"model_name"`
+	ResponseFormat   *string   `json:"response_format"`
+	Temperature      *float64  `json:"temperature"`
+	MaxTokens        *int      `json:"max_tokens"`
+	SystemPrompt     *string   `json:"system_prompt"`
+	Status           *string   `json:"status"`
+	RemoveAvatar     *bool     `json:"remove_avatar"`
 }
 
 func (m *Module) handleCreateAgent(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
+		return
+	}
+
+	userID, _ := currentUserContext(c)
+	if userID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
 
@@ -155,15 +232,22 @@ func (m *Module) handleCreateAgent(c *gin.Context) {
 		lang = "zh-CN"
 	}
 
+	agentStatus := statusActive
+	if m.reviewRequired() {
+		agentStatus = statusPending
+	}
+
 	agent := Agent{
 		Name:        name,
 		Gender:      gender,
-		Status:      "active",
+		Status:      agentStatus,
 		LangDefault: lang,
 		Version:     1,
+		CreatedBy:   userID,
 	}
 
 	agent.TitleAddress = normalizeStringPointer(req.TitleAddress)
+	agent.OneSentenceIntro = normalizeStringPointer(req.OneSentenceIntro)
 	agent.PersonaDesc = normalizeStringPointer(req.PersonaDesc)
 	agent.OpeningLine = normalizeStringPointer(req.OpeningLine)
 	agent.FirstTurnHint = normalizeStringPointer(req.FirstTurnHint)
@@ -273,6 +357,13 @@ func (m *Module) handleUpdateAgent(c *gin.Context) {
 		return
 	}
 
+	userID, roles := currentUserContext(c)
+	if userID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	isAdmin := hasRole(roles, "admin")
+
 	req, avatarFile, err := bindUpdateAgentRequest(c)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -288,6 +379,11 @@ func (m *Module) handleUpdateAgent(c *gin.Context) {
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load agent", "details": err.Error()})
 		}
+		return
+	}
+
+	if !isAdmin && agent.CreatedBy != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient privileges"})
 		return
 	}
 
@@ -337,6 +433,9 @@ func (m *Module) handleUpdateAgent(c *gin.Context) {
 	if req.TitleAddress != nil {
 		agentUpdates["title_address"] = normalizeStringPointer(req.TitleAddress)
 	}
+	if req.OneSentenceIntro != nil {
+		agentUpdates["one_sentence_intro"] = normalizeStringPointer(req.OneSentenceIntro)
+	}
 	if req.PersonaDesc != nil {
 		agentUpdates["persona_desc"] = normalizeStringPointer(req.PersonaDesc)
 	}
@@ -375,8 +474,22 @@ func (m *Module) handleUpdateAgent(c *gin.Context) {
 	}
 
 	if req.Status != nil {
+		if !isAdmin {
+			if newAvatarURL != "" {
+				_ = m.avatars.Remove(ctx, newAvatarURL)
+			}
+			c.JSON(http.StatusForbidden, gin.H{"error": "status updates require admin privileges"})
+			return
+		}
 		status := strings.ToLower(strings.TrimSpace(*req.Status))
-		allowedStatus := map[string]struct{}{"draft": {}, "active": {}, "paused": {}, "archived": {}}
+		allowedStatus := map[string]struct{}{
+			"draft":        {},
+			statusPending:  {},
+			statusActive:   {},
+			statusPaused:   {},
+			statusArchived: {},
+			statusRejected: {},
+		}
 		if _, ok := allowedStatus[status]; !ok {
 			if newAvatarURL != "" {
 				_ = m.avatars.Remove(ctx, newAvatarURL)
@@ -478,6 +591,16 @@ func (m *Module) handleUpdateAgent(c *gin.Context) {
 		cfgChanged = true
 	}
 
+	hasChanges := len(agentUpdates) > 0 || cfgChanged
+
+	if !isAdmin && hasChanges {
+		if m.reviewRequired() {
+			agentUpdates["status"] = statusPending
+		} else if agent.Status != statusActive {
+			agentUpdates["status"] = statusActive
+		}
+	}
+
 	err = m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if len(agentUpdates) > 0 {
 			if err := tx.Model(&Agent{}).Where("id = ?", agentID).Updates(agentUpdates).Error; err != nil {
@@ -538,22 +661,351 @@ func (m *Module) handleListAgents(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+
+	sortOrder, ok := normalizeAgentSortOrder(c.Query("sort"))
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sort value"})
+		return
+	}
+
+	direction := normalizeSortDirection(c.Query("direction"))
+
+	limit, err := parsePositiveLimit(c.Query("limit"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit value"})
+		return
+	}
+
 	status := strings.TrimSpace(c.Query("status"))
 	query := m.db.WithContext(ctx)
 	if status != "" {
 		query = query.Where("status = ?", status)
 	} else {
-		query = query.Where("status = ?", "active")
+		query = query.Where("status = ?", statusActive)
 	}
 
 	var agents []Agent
-	if err := query.Order("updated_at DESC").Find(&agents).Error; err != nil {
+	if err := query.Find(&agents).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list agents", "details": err.Error()})
 		return
 	}
 
+	agentIDs := make([]uint64, 0, len(agents))
+	for _, agent := range agents {
+		agentIDs = append(agentIDs, agent.ID)
+	}
+
+	summaries := make(map[uint64]ratingSummary, len(agentIDs))
+	if len(agentIDs) > 0 {
+		var summaryErr error
+		summaries, summaryErr = m.loadRatingSummaries(ctx, agentIDs)
+		if summaryErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load rating summaries", "details": summaryErr.Error()})
+			return
+		}
+	}
+
 	for i := range agents {
+		summary, exists := summaries[agents[i].ID]
+		if exists {
+			agents[i].AverageRating = summary.AverageScore
+			agents[i].RatingCount = summary.RatingCount
+		} else {
+			agents[i].AverageRating = 0
+			agents[i].RatingCount = 0
+		}
+		agents[i].HotScore = computeAgentHotScore(agents[i])
 		m.applyAvatarURL(ctx, &agents[i])
+	}
+
+	sortAgents(agents, sortOrder, direction)
+
+	if limit > 0 && limit < len(agents) {
+		agents = agents[:limit]
+	}
+
+	c.JSON(http.StatusOK, gin.H{"agents": agents})
+}
+
+func parsePositiveLimit(raw string) (int, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, nil
+	}
+
+	value, err := strconv.Atoi(trimmed)
+	if err != nil || value < 0 {
+		return 0, fmt.Errorf("invalid limit")
+	}
+
+	if value > maxListLimit {
+		return maxListLimit, nil
+	}
+
+	return value, nil
+}
+
+func normalizeSortDirection(raw string) string {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "asc", "ascending", "ascend", "up":
+		return "asc"
+	default:
+		return "desc"
+	}
+}
+
+func normalizeAgentSortOrder(raw string) (string, bool) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return "hot", true
+	}
+
+	switch value {
+	case "hot", "popular", "popularity", "hotness":
+		return "hot", true
+	case "views", "view_count", "viewcount", "hits", "traffic":
+		return "views", true
+	case "rating", "ratings", "score", "reviews":
+		return "rating", true
+	case "updated", "updated_at", "latest", "modified", "recent":
+		return "updated", true
+	case "created", "created_at", "creation", "newest":
+		return "created", true
+	default:
+		return "", false
+	}
+}
+
+func sortAgents(list []Agent, order, direction string) {
+	if len(list) <= 1 {
+		return
+	}
+
+	ascending := strings.ToLower(direction) == "asc"
+
+	compareNumbers := func(a, b float64) int {
+		switch {
+		case a < b:
+			return -1
+		case a > b:
+			return 1
+		default:
+			return 0
+		}
+	}
+
+	compareCounts := func(a, b uint64) int {
+		switch {
+		case a < b:
+			return -1
+		case a > b:
+			return 1
+		default:
+			return 0
+		}
+	}
+
+	compareTimes := func(a, b time.Time) int {
+		switch {
+		case a.Before(b):
+			return -1
+		case a.After(b):
+			return 1
+		default:
+			return 0
+		}
+	}
+
+	less := func(result int) bool {
+		if ascending {
+			return result < 0
+		}
+		return result > 0
+	}
+
+	sort.SliceStable(list, func(i, j int) bool {
+		switch order {
+		case "views":
+			if cmp := compareCounts(list[i].ViewCount, list[j].ViewCount); cmp != 0 {
+				return less(cmp)
+			}
+			if cmp := compareTimes(list[i].UpdatedAt, list[j].UpdatedAt); cmp != 0 {
+				return less(cmp)
+			}
+			return less(compareCounts(uint64(list[i].ID), uint64(list[j].ID)))
+		case "rating":
+			if cmp := compareNumbers(list[i].AverageRating, list[j].AverageRating); cmp != 0 {
+				return less(cmp)
+			}
+			if cmp := compareCounts(uint64(list[i].RatingCount), uint64(list[j].RatingCount)); cmp != 0 {
+				return less(cmp)
+			}
+			return less(compareTimes(list[i].UpdatedAt, list[j].UpdatedAt))
+		case "updated":
+			if cmp := compareTimes(list[i].UpdatedAt, list[j].UpdatedAt); cmp != 0 {
+				return less(cmp)
+			}
+			return less(compareCounts(uint64(list[i].ID), uint64(list[j].ID)))
+		case "created":
+			if cmp := compareTimes(list[i].CreatedAt, list[j].CreatedAt); cmp != 0 {
+				return less(cmp)
+			}
+			return less(compareCounts(uint64(list[i].ID), uint64(list[j].ID)))
+		default:
+			if cmp := compareNumbers(list[i].HotScore, list[j].HotScore); cmp != 0 {
+				return less(cmp)
+			}
+			if cmp := compareCounts(list[i].ViewCount, list[j].ViewCount); cmp != 0 {
+				return less(cmp)
+			}
+			return less(compareTimes(list[i].UpdatedAt, list[j].UpdatedAt))
+		}
+	})
+}
+
+func computeAgentHotScore(agent Agent) float64 {
+	viewComponent := math.Log(float64(agent.ViewCount)+1) * 4
+	ratingComponent := agent.AverageRating * (float64(agent.RatingCount) + 1)
+	recencyComponent := 0.0
+	if !agent.UpdatedAt.IsZero() {
+		hours := time.Since(agent.UpdatedAt).Hours()
+		if hours < 0 {
+			hours = 0
+		}
+		recencyComponent = math.Max(0, 6-math.Log(hours+1)*2)
+	}
+
+	return viewComponent + ratingComponent + recencyComponent
+}
+
+func (m *Module) handleListMyAgents(c *gin.Context) {
+	if m.db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
+		return
+	}
+
+	userID, _ := currentUserContext(c)
+	if userID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	var agents []Agent
+	if err := m.db.WithContext(ctx).Where("created_by = ?", userID).Order("updated_at DESC").Find(&agents).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list agents", "details": err.Error()})
+		return
+	}
+
+	agentIDs := make([]uint64, 0, len(agents))
+	for _, agent := range agents {
+		agentIDs = append(agentIDs, agent.ID)
+	}
+
+	summaries := make(map[uint64]ratingSummary, len(agentIDs))
+	if len(agentIDs) > 0 {
+		var err error
+		summaries, err = m.loadRatingSummaries(ctx, agentIDs)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load rating summaries", "details": err.Error()})
+			return
+		}
+	}
+
+	for i := range agents {
+		summary, exists := summaries[agents[i].ID]
+		if exists {
+			agents[i].AverageRating = summary.AverageScore
+			agents[i].RatingCount = summary.RatingCount
+		} else {
+			agents[i].AverageRating = 0
+			agents[i].RatingCount = 0
+		}
+		agents[i].HotScore = computeAgentHotScore(agents[i])
+		m.applyAvatarURL(ctx, &agents[i])
+	}
+
+	c.JSON(http.StatusOK, gin.H{"agents": agents})
+}
+
+func (m *Module) handleAdminListAgents(c *gin.Context) {
+	if m.db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	query := m.db.WithContext(ctx)
+
+	status := strings.TrimSpace(c.Query("status"))
+	if status != "" && !strings.EqualFold(status, "all") {
+		query = query.Where("status = ?", status)
+	}
+
+	creatorParam := strings.TrimSpace(c.Query("created_by"))
+	if creatorParam != "" {
+		creatorID, err := strconv.ParseUint(creatorParam, 10, 64)
+		if err != nil || creatorID == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid created_by value"})
+			return
+		}
+		query = query.Where("created_by = ?", creatorID)
+	}
+
+	sortOrder, ok := normalizeAgentSortOrder(c.Query("sort"))
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sort value"})
+		return
+	}
+
+	direction := normalizeSortDirection(c.Query("direction"))
+
+	limit, err := parsePositiveLimit(c.Query("limit"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit value"})
+		return
+	}
+
+	var agents []Agent
+	if err := query.Find(&agents).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list agents", "details": err.Error()})
+		return
+	}
+
+	agentIDs := make([]uint64, 0, len(agents))
+	for _, agent := range agents {
+		agentIDs = append(agentIDs, agent.ID)
+	}
+
+	summaries := make(map[uint64]ratingSummary, len(agentIDs))
+	if len(agentIDs) > 0 {
+		var err error
+		summaries, err = m.loadRatingSummaries(ctx, agentIDs)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load rating summaries", "details": err.Error()})
+			return
+		}
+	}
+
+	for i := range agents {
+		summary, exists := summaries[agents[i].ID]
+		if exists {
+			agents[i].AverageRating = summary.AverageScore
+			agents[i].RatingCount = summary.RatingCount
+		} else {
+			agents[i].AverageRating = 0
+			agents[i].RatingCount = 0
+		}
+		agents[i].HotScore = computeAgentHotScore(agents[i])
+		m.applyAvatarURL(ctx, &agents[i])
+	}
+
+	sortAgents(agents, sortOrder, direction)
+
+	if limit > 0 && limit < len(agents) {
+		agents = agents[:limit]
 	}
 
 	c.JSON(http.StatusOK, gin.H{"agents": agents})
@@ -583,6 +1035,24 @@ func (m *Module) handleGetAgent(c *gin.Context) {
 		return
 	}
 
+	if err := m.db.WithContext(ctx).
+		Model(&Agent{}).
+		Where("id = ?", id).
+		UpdateColumn("view_count", gorm.Expr("view_count + ?", 1)).Error; err != nil {
+		log.Printf("agents: failed to increment view count for %d: %v", id, err)
+	} else {
+		agent.ViewCount++
+	}
+
+	summary, err := m.loadRatingSummary(ctx, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load rating summary", "details": err.Error()})
+		return
+	}
+	agent.AverageRating = summary.AverageScore
+	agent.RatingCount = summary.RatingCount
+	agent.HotScore = computeAgentHotScore(agent)
+
 	m.applyAvatarURL(ctx, &agent)
 
 	var cfg AgentChatConfig
@@ -599,6 +1069,256 @@ func (m *Module) handleGetAgent(c *gin.Context) {
 		"agent":       agent,
 		"chat_config": cfg,
 	})
+}
+
+type ratingSummary struct {
+	AgentID      uint64  `json:"agent_id"`
+	AverageScore float64 `json:"average_score"`
+	RatingCount  int64   `json:"rating_count"`
+}
+
+type upsertRatingRequest struct {
+	UserID  uint64  `json:"user_id" binding:"required"`
+	Score   int     `json:"score" binding:"required"`
+	Comment *string `json:"comment"`
+}
+
+func (m *Module) handleGetRatings(c *gin.Context) {
+	if m.db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
+		return
+	}
+
+	agentID, err := strconv.ParseUint(strings.TrimSpace(c.Param("id")), 10, 64)
+	if err != nil || agentID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid agent id"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	summary, err := m.loadRatingSummary(ctx, agentID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load rating summary", "details": err.Error()})
+		return
+	}
+
+	response := gin.H{"summary": summary}
+
+	userParam := strings.TrimSpace(c.Query("user_id"))
+	if userParam != "" {
+		userID, err := strconv.ParseUint(userParam, 10, 64)
+		if err != nil || userID == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+			return
+		}
+
+		var existing AgentRating
+		if err := m.db.WithContext(ctx).Where("agent_id = ? AND user_id = ?", agentID, userID).Take(&existing).Error; err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load user rating", "details": err.Error()})
+				return
+			}
+		} else {
+			response["user_rating"] = existing
+		}
+	}
+
+	page := 1
+	if pageParam := strings.TrimSpace(c.Query("page")); pageParam != "" {
+		if value, convErr := strconv.Atoi(pageParam); convErr == nil && value > 0 {
+			page = value
+		}
+	}
+
+	pageSize := defaultRatingsPageSize
+	if sizeParam := strings.TrimSpace(c.Query("page_size")); sizeParam != "" {
+		if value, convErr := strconv.Atoi(sizeParam); convErr == nil && value > 0 {
+			if value > maxRatingsPageSize {
+				value = maxRatingsPageSize
+			}
+			pageSize = value
+		}
+	}
+
+	if pageSize <= 0 {
+		pageSize = defaultRatingsPageSize
+	}
+
+	offset := (page - 1) * pageSize
+	if offset < 0 {
+		offset = 0
+	}
+
+	var totalCount int64
+	if err := m.db.WithContext(ctx).Model(&AgentRating{}).Where("agent_id = ?", agentID).Count(&totalCount).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count ratings", "details": err.Error()})
+		return
+	}
+
+	tableName := AgentRating{}.TableName()
+	var ratings []struct {
+		ID              uint64    `json:"id"`
+		AgentID         uint64    `json:"agent_id"`
+		UserID          uint64    `json:"user_id"`
+		Score           int       `json:"score"`
+		Comment         *string   `json:"comment,omitempty"`
+		CreatedAt       time.Time `json:"created_at"`
+		UpdatedAt       time.Time `json:"updated_at"`
+		UserDisplayName string    `json:"user_display_name"`
+		UserAvatarURL   *string   `json:"user_avatar_url"`
+	}
+
+	listQuery := m.db.WithContext(ctx).
+		Table(tableName).
+		Select("agent_ratings.id, agent_ratings.agent_id, agent_ratings.user_id, agent_ratings.score, agent_ratings.comment, agent_ratings.created_at, agent_ratings.updated_at, users.display_name AS user_display_name, users.avatar_url AS user_avatar_url").
+		Joins("LEFT JOIN users ON users.id = agent_ratings.user_id").
+		Where("agent_ratings.agent_id = ?", agentID).
+		Order("agent_ratings.updated_at DESC")
+
+	if pageSize > 0 {
+		listQuery = listQuery.Limit(pageSize).Offset(offset)
+	}
+
+	if err := listQuery.Scan(&ratings).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load ratings", "details": err.Error()})
+		return
+	}
+
+	response["ratings"] = ratings
+	response["pagination"] = gin.H{
+		"page":      page,
+		"page_size": pageSize,
+		"total":     totalCount,
+	}
+	response["total_count"] = totalCount
+
+	c.JSON(http.StatusOK, response)
+}
+
+func (m *Module) handleUpsertRating(c *gin.Context) {
+	if m.db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
+		return
+	}
+
+	agentID, err := strconv.ParseUint(strings.TrimSpace(c.Param("id")), 10, 64)
+	if err != nil || agentID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid agent id"})
+		return
+	}
+
+	var req upsertRatingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
+		return
+	}
+
+	if req.UserID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id is required"})
+		return
+	}
+
+	if req.Score < 1 || req.Score > 5 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "score must be between 1 and 5"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	var rating AgentRating
+	err = m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("agent_id = ? AND user_id = ?", agentID, req.UserID).Take(&rating).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				rating = AgentRating{
+					AgentID: agentID,
+					UserID:  req.UserID,
+					Score:   req.Score,
+					Comment: normalizeStringPointer(req.Comment),
+				}
+				return tx.Create(&rating).Error
+			}
+			return err
+		}
+
+		rating.Score = req.Score
+		rating.Comment = normalizeStringPointer(req.Comment)
+
+		return tx.Save(&rating).Error
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save rating", "details": err.Error()})
+		return
+	}
+
+	summary, err := m.loadRatingSummary(ctx, agentID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load rating summary", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"rating":  rating,
+		"summary": summary,
+	})
+}
+
+func (m *Module) loadRatingSummaries(ctx context.Context, agentIDs []uint64) (map[uint64]ratingSummary, error) {
+	summaries := make(map[uint64]ratingSummary, len(agentIDs))
+	for _, id := range agentIDs {
+		summaries[id] = ratingSummary{
+			AgentID:      id,
+			AverageScore: 0,
+			RatingCount:  0,
+		}
+	}
+
+	if len(agentIDs) == 0 || m == nil || m.db == nil {
+		return summaries, nil
+	}
+
+	var rows []struct {
+		AgentID      uint64
+		AverageScore float64
+		RatingCount  int64
+	}
+	dbResult := m.db.WithContext(ctx).
+		Model(&AgentRating{}).
+		Select("agent_id, AVG(score) AS average_score, COUNT(*) AS rating_count").
+		Where("agent_id IN ?", agentIDs).
+		Group("agent_id").
+		Scan(&rows)
+	if dbResult.Error != nil {
+		return nil, dbResult.Error
+	}
+
+	for _, row := range rows {
+		summaries[row.AgentID] = ratingSummary{
+			AgentID:      row.AgentID,
+			AverageScore: roundRating(row.AverageScore),
+			RatingCount:  row.RatingCount,
+		}
+	}
+
+	return summaries, nil
+}
+
+func (m *Module) loadRatingSummary(ctx context.Context, agentID uint64) (ratingSummary, error) {
+	summaries, err := m.loadRatingSummaries(ctx, []uint64{agentID})
+	if err != nil {
+		return ratingSummary{AgentID: agentID, AverageScore: 0, RatingCount: 0}, err
+	}
+	if summary, ok := summaries[agentID]; ok {
+		return summary, nil
+	}
+	return ratingSummary{AgentID: agentID, AverageScore: 0, RatingCount: 0}, nil
+}
+
+func roundRating(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0
+	}
+	return math.Round(value*10) / 10
 }
 
 type conversationInitRequest struct {
@@ -841,6 +1561,7 @@ func bindCreateAgentRequest(c *gin.Context) (createAgentRequest, *multipart.File
 		req.ModelName = firstFormValue(form.Value["model_name"])
 		req.ResponseFormat = firstFormValue(form.Value["response_format"])
 		req.TitleAddress = optionalStringPointer(form.Value["title_address"])
+		req.OneSentenceIntro = optionalStringPointer(form.Value["one_sentence_intro"])
 		req.PersonaDesc = optionalStringPointer(form.Value["persona_desc"])
 		req.OpeningLine = optionalStringPointer(form.Value["opening_line"])
 		req.FirstTurnHint = optionalStringPointer(form.Value["first_turn_hint"])
@@ -901,6 +1622,7 @@ func bindUpdateAgentRequest(c *gin.Context) (updateAgentRequest, *multipart.File
 		req.Name = formStringPointer(form.Value["name"])
 		req.Gender = formStringPointer(form.Value["gender"])
 		req.TitleAddress = formStringPointer(form.Value["title_address"])
+		req.OneSentenceIntro = formStringPointer(form.Value["one_sentence_intro"])
 		req.PersonaDesc = formStringPointer(form.Value["persona_desc"])
 		req.OpeningLine = formStringPointer(form.Value["opening_line"])
 		req.FirstTurnHint = formStringPointer(form.Value["first_turn_hint"])
@@ -1027,6 +1749,118 @@ func parseBoolField(values []string) (*bool, error) {
 	return &parsed, nil
 }
 
+func currentUserContext(c *gin.Context) (uint64, []string) {
+	if c == nil {
+		return 0, nil
+	}
+
+	claims := jwt.ExtractClaims(c)
+	if len(claims) == 0 {
+		return 0, nil
+	}
+
+	userID := parseUserIDClaim(claims[claimUserIDKey])
+	roles := extractRolesClaim(claims[claimRolesKey])
+
+	return userID, roles
+}
+
+func parseUserIDClaim(raw interface{}) uint64 {
+	switch v := raw.(type) {
+	case float64:
+		if v <= 0 {
+			return 0
+		}
+		return uint64(v)
+	case float32:
+		if v <= 0 {
+			return 0
+		}
+		return uint64(v)
+	case int:
+		if v <= 0 {
+			return 0
+		}
+		return uint64(v)
+	case int32:
+		if v <= 0 {
+			return 0
+		}
+		return uint64(v)
+	case int64:
+		if v <= 0 {
+			return 0
+		}
+		return uint64(v)
+	case uint:
+		return uint64(v)
+	case uint32:
+		return uint64(v)
+	case uint64:
+		return v
+	case json.Number:
+		parsed, err := v.Int64()
+		if err != nil || parsed <= 0 {
+			return 0
+		}
+		return uint64(parsed)
+	default:
+		return 0
+	}
+}
+
+func extractRolesClaim(raw interface{}) []string {
+	switch values := raw.(type) {
+	case []string:
+		result := make([]string, 0, len(values))
+		for _, role := range values {
+			trimmed := strings.TrimSpace(role)
+			if trimmed != "" {
+				result = append(result, trimmed)
+			}
+		}
+		return result
+	case []interface{}:
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			if label, ok := value.(string); ok {
+				trimmed := strings.TrimSpace(label)
+				if trimmed != "" {
+					result = append(result, trimmed)
+				}
+			}
+		}
+		return result
+	case string:
+		trimmed := strings.TrimSpace(values)
+		if trimmed == "" {
+			return []string{}
+		}
+		return []string{trimmed}
+	default:
+		return []string{}
+	}
+}
+
+func hasRole(roles []string, target string) bool {
+	if len(roles) == 0 {
+		return false
+	}
+
+	normalized := strings.ToLower(strings.TrimSpace(target))
+	if normalized == "" {
+		return false
+	}
+
+	for _, role := range roles {
+		if strings.ToLower(strings.TrimSpace(role)) == normalized {
+			return true
+		}
+	}
+
+	return false
+}
+
 func normalizeTags(tags []string) []string {
 	seen := make(map[string]struct{}, len(tags))
 	result := make([]string, 0, len(tags))
@@ -1043,80 +1877,6 @@ func normalizeTags(tags []string) []string {
 	}
 	return result
 }
-
-func requireRole(role string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if strings.TrimSpace(role) == "" {
-			c.Next()
-			return
-		}
-
-		claims := jwt.ExtractClaims(c)
-		if len(claims) == 0 {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
-			return
-		}
-
-		roles := extractRoles(claims["roles"])
-		if !hasRole(roles, role) {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient privileges"})
-			return
-		}
-
-		c.Next()
-	}
-}
-
-func extractRoles(value interface{}) []string {
-	switch roles := value.(type) {
-	case []string:
-		result := make([]string, 0, len(roles))
-		for _, role := range roles {
-			trimmed := strings.ToLower(strings.TrimSpace(role))
-			if trimmed != "" {
-				result = append(result, trimmed)
-			}
-		}
-		return result
-	case []interface{}:
-		result := make([]string, 0, len(roles))
-		for _, item := range roles {
-			if str, ok := item.(string); ok {
-				trimmed := strings.ToLower(strings.TrimSpace(str))
-				if trimmed != "" {
-					result = append(result, trimmed)
-				}
-			}
-		}
-		return result
-	case string:
-		parts := strings.Split(roles, ",")
-		result := make([]string, 0, len(parts))
-		for _, part := range parts {
-			trimmed := strings.ToLower(strings.TrimSpace(part))
-			if trimmed != "" {
-				result = append(result, trimmed)
-			}
-		}
-		return result
-	default:
-		return nil
-	}
-}
-
-func hasRole(roles []string, role string) bool {
-	target := strings.ToLower(strings.TrimSpace(role))
-	if target == "" {
-		return false
-	}
-	for _, candidate := range roles {
-		if strings.ToLower(strings.TrimSpace(candidate)) == target {
-			return true
-		}
-	}
-	return false
-}
-
 func normalizeStringPointer(value *string) *string {
 	if value == nil {
 		return nil
