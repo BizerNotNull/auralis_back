@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +40,12 @@ const (
 
 	claimUserIDKey = "user_id"
 	claimRolesKey  = "roles"
+)
+
+const (
+	defaultRatingsPageSize = 10
+	maxRatingsPageSize     = 50
+	maxListLimit           = 100
 )
 
 func (m *Module) applyAvatarURL(ctx context.Context, agent *Agent) {
@@ -654,6 +661,21 @@ func (m *Module) handleListAgents(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+
+	sortOrder, ok := normalizeAgentSortOrder(c.Query("sort"))
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sort value"})
+		return
+	}
+
+	direction := normalizeSortDirection(c.Query("direction"))
+
+	limit, err := parsePositiveLimit(c.Query("limit"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit value"})
+		return
+	}
+
 	status := strings.TrimSpace(c.Query("status"))
 	query := m.db.WithContext(ctx)
 	if status != "" {
@@ -663,7 +685,7 @@ func (m *Module) handleListAgents(c *gin.Context) {
 	}
 
 	var agents []Agent
-	if err := query.Order("updated_at DESC").Find(&agents).Error; err != nil {
+	if err := query.Find(&agents).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list agents", "details": err.Error()})
 		return
 	}
@@ -675,10 +697,10 @@ func (m *Module) handleListAgents(c *gin.Context) {
 
 	summaries := make(map[uint64]ratingSummary, len(agentIDs))
 	if len(agentIDs) > 0 {
-		var err error
-		summaries, err = m.loadRatingSummaries(ctx, agentIDs)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load rating summaries", "details": err.Error()})
+		var summaryErr error
+		summaries, summaryErr = m.loadRatingSummaries(ctx, agentIDs)
+		if summaryErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load rating summaries", "details": summaryErr.Error()})
 			return
 		}
 	}
@@ -692,10 +714,169 @@ func (m *Module) handleListAgents(c *gin.Context) {
 			agents[i].AverageRating = 0
 			agents[i].RatingCount = 0
 		}
+		agents[i].HotScore = computeAgentHotScore(agents[i])
 		m.applyAvatarURL(ctx, &agents[i])
 	}
 
+	sortAgents(agents, sortOrder, direction)
+
+	if limit > 0 && limit < len(agents) {
+		agents = agents[:limit]
+	}
+
 	c.JSON(http.StatusOK, gin.H{"agents": agents})
+}
+
+func parsePositiveLimit(raw string) (int, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, nil
+	}
+
+	value, err := strconv.Atoi(trimmed)
+	if err != nil || value < 0 {
+		return 0, fmt.Errorf("invalid limit")
+	}
+
+	if value > maxListLimit {
+		return maxListLimit, nil
+	}
+
+	return value, nil
+}
+
+func normalizeSortDirection(raw string) string {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "asc", "ascending", "ascend", "up":
+		return "asc"
+	default:
+		return "desc"
+	}
+}
+
+func normalizeAgentSortOrder(raw string) (string, bool) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return "hot", true
+	}
+
+	switch value {
+	case "hot", "popular", "popularity", "hotness":
+		return "hot", true
+	case "views", "view_count", "viewcount", "hits", "traffic":
+		return "views", true
+	case "rating", "ratings", "score", "reviews":
+		return "rating", true
+	case "updated", "updated_at", "latest", "modified", "recent":
+		return "updated", true
+	case "created", "created_at", "creation", "newest":
+		return "created", true
+	default:
+		return "", false
+	}
+}
+
+func sortAgents(list []Agent, order, direction string) {
+	if len(list) <= 1 {
+		return
+	}
+
+	ascending := strings.ToLower(direction) == "asc"
+
+	compareNumbers := func(a, b float64) int {
+		switch {
+		case a < b:
+			return -1
+		case a > b:
+			return 1
+		default:
+			return 0
+		}
+	}
+
+	compareCounts := func(a, b uint64) int {
+		switch {
+		case a < b:
+			return -1
+		case a > b:
+			return 1
+		default:
+			return 0
+		}
+	}
+
+	compareTimes := func(a, b time.Time) int {
+		switch {
+		case a.Before(b):
+			return -1
+		case a.After(b):
+			return 1
+		default:
+			return 0
+		}
+	}
+
+	less := func(result int) bool {
+		if ascending {
+			return result < 0
+		}
+		return result > 0
+	}
+
+	sort.SliceStable(list, func(i, j int) bool {
+		switch order {
+		case "views":
+			if cmp := compareCounts(list[i].ViewCount, list[j].ViewCount); cmp != 0 {
+				return less(cmp)
+			}
+			if cmp := compareTimes(list[i].UpdatedAt, list[j].UpdatedAt); cmp != 0 {
+				return less(cmp)
+			}
+			return less(compareCounts(uint64(list[i].ID), uint64(list[j].ID)))
+		case "rating":
+			if cmp := compareNumbers(list[i].AverageRating, list[j].AverageRating); cmp != 0 {
+				return less(cmp)
+			}
+			if cmp := compareCounts(uint64(list[i].RatingCount), uint64(list[j].RatingCount)); cmp != 0 {
+				return less(cmp)
+			}
+			return less(compareTimes(list[i].UpdatedAt, list[j].UpdatedAt))
+		case "updated":
+			if cmp := compareTimes(list[i].UpdatedAt, list[j].UpdatedAt); cmp != 0 {
+				return less(cmp)
+			}
+			return less(compareCounts(uint64(list[i].ID), uint64(list[j].ID)))
+		case "created":
+			if cmp := compareTimes(list[i].CreatedAt, list[j].CreatedAt); cmp != 0 {
+				return less(cmp)
+			}
+			return less(compareCounts(uint64(list[i].ID), uint64(list[j].ID)))
+		default:
+			if cmp := compareNumbers(list[i].HotScore, list[j].HotScore); cmp != 0 {
+				return less(cmp)
+			}
+			if cmp := compareCounts(list[i].ViewCount, list[j].ViewCount); cmp != 0 {
+				return less(cmp)
+			}
+			return less(compareTimes(list[i].UpdatedAt, list[j].UpdatedAt))
+		}
+	})
+}
+
+func computeAgentHotScore(agent Agent) float64 {
+	viewComponent := math.Log(float64(agent.ViewCount)+1) * 4
+	ratingComponent := agent.AverageRating * (float64(agent.RatingCount) + 1)
+	recencyComponent := 0.0
+	if !agent.UpdatedAt.IsZero() {
+		hours := time.Since(agent.UpdatedAt).Hours()
+		if hours < 0 {
+			hours = 0
+		}
+		recencyComponent = math.Max(0, 6-math.Log(hours+1)*2)
+	}
+
+	return viewComponent + ratingComponent + recencyComponent
 }
 
 func (m *Module) handleListMyAgents(c *gin.Context) {
@@ -742,6 +923,7 @@ func (m *Module) handleListMyAgents(c *gin.Context) {
 			agents[i].AverageRating = 0
 			agents[i].RatingCount = 0
 		}
+		agents[i].HotScore = computeAgentHotScore(agents[i])
 		m.applyAvatarURL(ctx, &agents[i])
 	}
 
@@ -772,8 +954,22 @@ func (m *Module) handleAdminListAgents(c *gin.Context) {
 		query = query.Where("created_by = ?", creatorID)
 	}
 
+	sortOrder, ok := normalizeAgentSortOrder(c.Query("sort"))
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sort value"})
+		return
+	}
+
+	direction := normalizeSortDirection(c.Query("direction"))
+
+	limit, err := parsePositiveLimit(c.Query("limit"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit value"})
+		return
+	}
+
 	var agents []Agent
-	if err := query.Order("updated_at DESC").Find(&agents).Error; err != nil {
+	if err := query.Find(&agents).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list agents", "details": err.Error()})
 		return
 	}
@@ -802,7 +998,14 @@ func (m *Module) handleAdminListAgents(c *gin.Context) {
 			agents[i].AverageRating = 0
 			agents[i].RatingCount = 0
 		}
+		agents[i].HotScore = computeAgentHotScore(agents[i])
 		m.applyAvatarURL(ctx, &agents[i])
+	}
+
+	sortAgents(agents, sortOrder, direction)
+
+	if limit > 0 && limit < len(agents) {
+		agents = agents[:limit]
 	}
 
 	c.JSON(http.StatusOK, gin.H{"agents": agents})
@@ -832,6 +1035,15 @@ func (m *Module) handleGetAgent(c *gin.Context) {
 		return
 	}
 
+	if err := m.db.WithContext(ctx).
+		Model(&Agent{}).
+		Where("id = ?", id).
+		UpdateColumn("view_count", gorm.Expr("view_count + ?", 1)).Error; err != nil {
+		log.Printf("agents: failed to increment view count for %d: %v", id, err)
+	} else {
+		agent.ViewCount++
+	}
+
 	summary, err := m.loadRatingSummary(ctx, id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load rating summary", "details": err.Error()})
@@ -839,6 +1051,7 @@ func (m *Module) handleGetAgent(c *gin.Context) {
 	}
 	agent.AverageRating = summary.AverageScore
 	agent.RatingCount = summary.RatingCount
+	agent.HotScore = computeAgentHotScore(agent)
 
 	m.applyAvatarURL(ctx, &agent)
 
@@ -910,6 +1123,75 @@ func (m *Module) handleGetRatings(c *gin.Context) {
 			response["user_rating"] = existing
 		}
 	}
+
+	page := 1
+	if pageParam := strings.TrimSpace(c.Query("page")); pageParam != "" {
+		if value, convErr := strconv.Atoi(pageParam); convErr == nil && value > 0 {
+			page = value
+		}
+	}
+
+	pageSize := defaultRatingsPageSize
+	if sizeParam := strings.TrimSpace(c.Query("page_size")); sizeParam != "" {
+		if value, convErr := strconv.Atoi(sizeParam); convErr == nil && value > 0 {
+			if value > maxRatingsPageSize {
+				value = maxRatingsPageSize
+			}
+			pageSize = value
+		}
+	}
+
+	if pageSize <= 0 {
+		pageSize = defaultRatingsPageSize
+	}
+
+	offset := (page - 1) * pageSize
+	if offset < 0 {
+		offset = 0
+	}
+
+	var totalCount int64
+	if err := m.db.WithContext(ctx).Model(&AgentRating{}).Where("agent_id = ?", agentID).Count(&totalCount).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count ratings", "details": err.Error()})
+		return
+	}
+
+	tableName := AgentRating{}.TableName()
+	var ratings []struct {
+		ID              uint64    `json:"id"`
+		AgentID         uint64    `json:"agent_id"`
+		UserID          uint64    `json:"user_id"`
+		Score           int       `json:"score"`
+		Comment         *string   `json:"comment,omitempty"`
+		CreatedAt       time.Time `json:"created_at"`
+		UpdatedAt       time.Time `json:"updated_at"`
+		UserDisplayName string    `json:"user_display_name"`
+		UserAvatarURL   *string   `json:"user_avatar_url"`
+	}
+
+	listQuery := m.db.WithContext(ctx).
+		Table(tableName).
+		Select("agent_ratings.id, agent_ratings.agent_id, agent_ratings.user_id, agent_ratings.score, agent_ratings.comment, agent_ratings.created_at, agent_ratings.updated_at, users.display_name AS user_display_name, users.avatar_url AS user_avatar_url").
+		Joins("LEFT JOIN users ON users.id = agent_ratings.user_id").
+		Where("agent_ratings.agent_id = ?", agentID).
+		Order("agent_ratings.updated_at DESC")
+
+	if pageSize > 0 {
+		listQuery = listQuery.Limit(pageSize).Offset(offset)
+	}
+
+	if err := listQuery.Scan(&ratings).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load ratings", "details": err.Error()})
+		return
+	}
+
+	response["ratings"] = ratings
+	response["pagination"] = gin.H{
+		"page":      page,
+		"page_size": pageSize,
+		"total":     totalCount,
+	}
+	response["total_count"] = totalCount
 
 	c.JSON(http.StatusOK, response)
 }

@@ -96,10 +96,10 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 			}
 		}
 		c.JSON(http.StatusOK, gin.H{
-			"captcha_id": challenge.ID,
-			"question":   challenge.Question,
-			"expires_in": expiresIn,
-			"expires_at": challenge.ExpiresAt.UTC(),
+			"captcha_id":   challenge.ID,
+			"image_base64": challenge.ImageBase64,
+			"expires_in":   expiresIn,
+			"expires_at":   challenge.ExpiresAt.UTC(),
 		})
 	})
 	authGroup.POST("/register", func(c *gin.Context) {

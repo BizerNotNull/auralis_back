@@ -24,6 +24,8 @@ type Agent struct {
 	Notes            *string        `gorm:"type:text" json:"notes,omitempty"`
 	AverageRating    float64        `gorm:"-" json:"average_rating"`
 	RatingCount      int64          `gorm:"-" json:"rating_count"`
+	ViewCount        uint64         `gorm:"not null;default:0" json:"view_count"`
+	HotScore         float64        `gorm:"-" json:"-"`
 	CreatedBy        uint64         `gorm:"not null;index" json:"created_by"`
 	CreatedAt        time.Time      `json:"created_at"`
 	UpdatedAt        time.Time      `json:"updated_at"`

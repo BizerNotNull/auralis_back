@@ -1,46 +1,38 @@
 package authorization
 
 import (
-	"fmt"
-	"math/rand"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/mojocn/base64Captcha"
 )
 
-// captchaEntry tracks a pending captcha challenge.
-type captchaEntry struct {
-	answer    string
-	expiresAt time.Time
-}
-
-// CaptchaChallenge represents an issued captcha.
+// CaptchaChallenge represents an issued captcha image.
 type CaptchaChallenge struct {
-	ID        string
-	Question  string
-	ExpiresAt time.Time
-	TTL       time.Duration
+	ID          string
+	ImageBase64 string
+	ExpiresAt   time.Time
+	TTL         time.Duration
 }
 
-// CaptchaStore keeps captcha challenges in memory.
+// CaptchaStore manages captcha generation and verification.
 type CaptchaStore struct {
-	mu      sync.Mutex
-	entries map[string]captchaEntry
-	ttl     time.Duration
-	rnd     *rand.Rand
+	mu     sync.Mutex
+	driver *base64Captcha.DriverDigit
+	store  base64Captcha.Store
+	ttl    time.Duration
 }
 
-// NewCaptchaStore creates an in-memory captcha store with the provided ttl window.
+// NewCaptchaStore creates an image-based captcha store with the provided ttl window.
 func NewCaptchaStore(ttl time.Duration) *CaptchaStore {
 	if ttl <= 0 {
 		ttl = 2 * time.Minute
 	}
 	return &CaptchaStore{
-		entries: make(map[string]captchaEntry),
-		ttl:     ttl,
-		rnd:     rand.New(rand.NewSource(time.Now().UnixNano())),
+		driver: base64Captcha.NewDriverDigit(60, 160, 5, 0.7, 80),
+		store:  base64Captcha.NewMemoryStore(2048, ttl),
+		ttl:    ttl,
 	}
 }
 
@@ -52,18 +44,20 @@ func (s *CaptchaStore) Issue() CaptchaChallenge {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.cleanupLocked()
 
-	a := s.rnd.Intn(9) + 1
-	b := s.rnd.Intn(9) + 1
-	question := fmt.Sprintf("%d + %d = ?", a, b)
-	answer := fmt.Sprintf("%d", a+b)
+	captcha := base64Captcha.NewCaptcha(s.driver, s.store)
+	id, image, _, err := captcha.Generate()
+	if err != nil {
+		return CaptchaChallenge{}
+	}
 
-	id := uuid.NewString()
+	imageData := strings.TrimSpace(image)
+	if imageData != "" && !strings.HasPrefix(imageData, "data:") {
+		imageData = "data:image/png;base64," + imageData
+	}
+
 	expiresAt := time.Now().Add(s.ttl)
-	s.entries[id] = captchaEntry{answer: answer, expiresAt: expiresAt}
-
-	return CaptchaChallenge{ID: id, Question: question, ExpiresAt: expiresAt, TTL: s.ttl}
+	return CaptchaChallenge{ID: id, ImageBase64: imageData, ExpiresAt: expiresAt, TTL: s.ttl}
 }
 
 // Verify checks whether the supplied captcha answer is valid.
@@ -78,31 +72,6 @@ func (s *CaptchaStore) Verify(id, answer string) bool {
 		return false
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.cleanupLocked()
-
-	entry, ok := s.entries[trimmedID]
-	if !ok {
-		return false
-	}
-	delete(s.entries, trimmedID)
-
-	if time.Now().After(entry.expiresAt) {
-		return false
-	}
-
-	return strings.EqualFold(entry.answer, trimmedAnswer)
-}
-
-func (s *CaptchaStore) cleanupLocked() {
-	if s == nil {
-		return
-	}
-	now := time.Now()
-	for id, entry := range s.entries {
-		if now.After(entry.expiresAt) {
-			delete(s.entries, id)
-		}
-	}
+	captcha := base64Captcha.NewCaptcha(s.driver, s.store)
+	return captcha.Verify(trimmedID, trimmedAnswer, true)
 }

@@ -80,6 +80,7 @@ CREATE TABLE `agents`  (
   `updated_at` datetime(3) NULL DEFAULT NULL,
   `live2_d_model_id` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
   `avatar_url` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `view_count` bigint UNSIGNED NOT NULL DEFAULT 0 COMMENT '浏览次数',
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_agents_status`(`status` ASC) USING BTREE,
   INDEX `idx_agents_created_by`(`created_by` ASC) USING BTREE,
