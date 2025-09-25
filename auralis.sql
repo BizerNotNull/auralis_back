@@ -66,22 +66,44 @@ CREATE TABLE `agents`  (
   `gender` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
   `title_address` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
   `persona_desc` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
+  `one_sentence_intro` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL COMMENT '一句话介绍',
   `opening_line` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
   `first_turn_hint` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
   `live2d_model_id` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL COMMENT '关联的 Live2D 模型标识',
-  `status` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'draft',
+  `status` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pending',
   `lang_default` varchar(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'zh-CN',
   `tags` json NULL,
   `version` bigint NOT NULL DEFAULT 1,
   `notes` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
+  `created_by` bigint UNSIGNED NOT NULL COMMENT '创建人用户ID',
   `created_at` datetime(3) NULL DEFAULT NULL,
   `updated_at` datetime(3) NULL DEFAULT NULL,
   `live2_d_model_id` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
   `avatar_url` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_agents_status`(`status` ASC) USING BTREE,
+  INDEX `idx_agents_created_by`(`created_by` ASC) USING BTREE,
   INDEX `idx_agents_name`(`name` ASC) USING BTREE
 ) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '代理（角色）主数据' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for agent_ratings
+-- ----------------------------
+DROP TABLE IF EXISTS `agent_ratings`;
+CREATE TABLE `agent_ratings`  (
+  `id` bigint UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '����',
+  `agent_id` bigint UNSIGNED NOT NULL COMMENT '���� agents.id',
+  `user_id` bigint UNSIGNED NOT NULL COMMENT '���� users.id',
+  `score` int NOT NULL COMMENT '1-5 ��',
+  `comment` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL COMMENT '�û����ۺͷ���',
+  `created_at` datetime(3) NULL DEFAULT NULL,
+  `updated_at` datetime(3) NULL DEFAULT NULL,
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `idx_agent_ratings_agent_user`(`agent_id` ASC, `user_id` ASC) USING BTREE,
+  INDEX `idx_agent_ratings_agent`(`agent_id` ASC) USING BTREE,
+  CONSTRAINT `fk_agent_ratings_agent` FOREIGN KEY (`agent_id`) REFERENCES `agents` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `fk_agent_ratings_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '�û�����智能体����' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for conversations
@@ -195,10 +217,12 @@ CREATE TABLE `user_roles`  (
 -- ----------------------------
 DROP TABLE IF EXISTS `users`;
 CREATE TABLE `users`  (
-  `id` bigint UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `id` bigint UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '账号',
   `username` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `password_hash` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `display_name` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
+  `nickname` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `email` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `avatar_url` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
   `bio` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
   `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT 'active',
@@ -206,7 +230,9 @@ CREATE TABLE `users`  (
   `created_at` datetime(3) NULL DEFAULT NULL,
   `updated_at` datetime(3) NULL DEFAULT NULL,
   PRIMARY KEY (`id`) USING BTREE,
-  UNIQUE INDEX `idx_users_username`(`username` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '应用账户表' ROW_FORMAT = Dynamic;
+  UNIQUE INDEX `idx_users_username`(`username` ASC) USING BTREE,
+  UNIQUE INDEX `idx_users_email`(`email` ASC) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '应用账号表' ROW_FORMAT = Dynamic;
 
 SET FOREIGN_KEY_CHECKS = 1;
+

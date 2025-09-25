@@ -26,9 +26,10 @@ var allowedMessageRoles = map[string]struct{}{
 }
 
 type Module struct {
-	client *ChatClient
-	db     *gorm.DB
-	tts    tts.Synthesizer
+	client       *ChatClient
+	db           *gorm.DB
+	tts          tts.Synthesizer
+	modelCatalog []ChatModelOption
 }
 
 // RegisterRoutes mounts the LLM testing endpoint under /llm.
@@ -47,14 +48,40 @@ func RegisterRoutes(router *gin.Engine, synthesizer tts.Synthesizer) (*Module, e
 		return nil, err
 	}
 
-	module := &Module{client: client, db: db, tts: synthesizer}
+	module := &Module{
+		client:       client,
+		db:           db,
+		tts:          synthesizer,
+		modelCatalog: loadChatModelCatalog(),
+	}
 
 	group := router.Group("/llm")
+	group.GET("/models", module.handleListModels)
 	group.POST("/complete", module.handleComplete)
 	group.GET("/messages", module.handleRecentMessages)
 	group.POST("/messages", module.handleCreateMessage)
 
 	return module, nil
+}
+
+// handleListModels exposes the configured chat model catalog to clients.
+func (m *Module) handleListModels(c *gin.Context) {
+	catalog := m.modelCatalog
+	if len(catalog) == 0 {
+		catalog = loadChatModelCatalog()
+		m.modelCatalog = catalog
+	}
+
+	providerFilter := strings.TrimSpace(c.Query("provider"))
+	result := make([]ChatModelOption, 0, len(catalog))
+	for _, option := range catalog {
+		if providerFilter != "" && !strings.EqualFold(option.Provider, providerFilter) {
+			continue
+		}
+		result = append(result, option)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"models": result})
 }
 
 type completeRequest struct {
