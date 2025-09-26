@@ -17,6 +17,7 @@ import (
 
 	"auralis_back/authorization"
 	filestore "auralis_back/storage"
+	"auralis_back/tts"
 	jwt "github.com/appleboy/gin-jwt/v2"
 	"github.com/gin-gonic/gin"
 	"gorm.io/datatypes"
@@ -166,6 +167,7 @@ type createAgentRequest struct {
 	FirstTurnHint    *string  `json:"first_turn_hint"`
 	Live2DModelID    *string  `json:"live2d_model_id"`
 	VoiceID          string   `json:"voice_id"`
+	VoiceProvider    string   `json:"voice_provider"`
 	LangDefault      string   `json:"lang_default"`
 	Tags             []string `json:"tags"`
 	Notes            *string  `json:"notes"`
@@ -187,6 +189,7 @@ type updateAgentRequest struct {
 	FirstTurnHint    *string   `json:"first_turn_hint"`
 	Live2DModelID    *string   `json:"live2d_model_id"`
 	VoiceID          *string   `json:"voice_id"`
+	VoiceProvider    *string   `json:"voice_provider"`
 	LangDefault      *string   `json:"lang_default"`
 	Tags             *[]string `json:"tags"`
 	Notes            *string   `json:"notes"`
@@ -257,6 +260,13 @@ func (m *Module) handleCreateAgent(c *gin.Context) {
 	if voice := strings.TrimSpace(req.VoiceID); voice != "" {
 		voiceCopy := voice
 		agent.VoiceID = &voiceCopy
+	}
+	if provider := strings.TrimSpace(req.VoiceProvider); provider != "" {
+		normalized := tts.NormalizeProviderID(provider)
+		if normalized != "" {
+			providerCopy := normalized
+			agent.VoiceProvider = &providerCopy
+		}
 	}
 	agent.Notes = normalizeStringPointer(req.Notes)
 
@@ -456,6 +466,20 @@ func (m *Module) handleUpdateAgent(c *gin.Context) {
 	}
 	if req.VoiceID != nil {
 		agentUpdates["voice_id"] = normalizeStringPointer(req.VoiceID)
+	}
+	if req.VoiceProvider != nil {
+		providerValue := strings.TrimSpace(*req.VoiceProvider)
+		if providerValue == "" {
+			agentUpdates["voice_provider"] = gorm.Expr("NULL")
+		} else {
+			normalized := tts.NormalizeProviderID(providerValue)
+			if normalized == "" {
+				agentUpdates["voice_provider"] = gorm.Expr("NULL")
+			} else {
+				providerCopy := normalized
+				agentUpdates["voice_provider"] = &providerCopy
+			}
+		}
 	}
 	if req.Notes != nil {
 		agentUpdates["notes"] = normalizeStringPointer(req.Notes)
@@ -1576,6 +1600,8 @@ func bindCreateAgentRequest(c *gin.Context) (createAgentRequest, *multipart.File
 		req.FirstTurnHint = optionalStringPointer(form.Value["first_turn_hint"])
 		req.Live2DModelID = optionalStringPointer(form.Value["live2d_model_id"])
 		req.VoiceID = firstFormValue(form.Value["voice_id"])
+
+		req.VoiceProvider = firstFormValue(form.Value["voice_provider"])
 		req.Notes = optionalStringPointer(form.Value["notes"])
 		req.SystemPrompt = optionalStringPointer(form.Value["system_prompt"])
 
@@ -1638,6 +1664,8 @@ func bindUpdateAgentRequest(c *gin.Context) (updateAgentRequest, *multipart.File
 		req.FirstTurnHint = formStringPointer(form.Value["first_turn_hint"])
 		req.Live2DModelID = formStringPointer(form.Value["live2d_model_id"])
 		req.VoiceID = formStringPointer(form.Value["voice_id"])
+
+		req.VoiceProvider = formStringPointer(form.Value["voice_provider"])
 		req.LangDefault = formStringPointer(form.Value["lang_default"])
 		req.Notes = formStringPointer(form.Value["notes"])
 		req.ModelProvider = formStringPointer(form.Value["model_provider"])

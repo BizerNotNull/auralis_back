@@ -29,6 +29,7 @@ type Module struct {
 	client       *ChatClient
 	db           *gorm.DB
 	tts          tts.Synthesizer
+	memory       *conversationMemory
 	modelCatalog []ChatModelOption
 }
 
@@ -44,7 +45,7 @@ func RegisterRoutes(router *gin.Engine, synthesizer tts.Synthesizer) (*Module, e
 		return nil, err
 	}
 
-	if err := db.AutoMigrate(&conversation{}, &message{}); err != nil {
+	if err := db.AutoMigrate(&conversation{}, &message{}, &userAgentMemory{}); err != nil {
 		return nil, err
 	}
 
@@ -52,6 +53,7 @@ func RegisterRoutes(router *gin.Engine, synthesizer tts.Synthesizer) (*Module, e
 		client:       client,
 		db:           db,
 		tts:          synthesizer,
+		memory:       newConversationMemory(db, client),
 		modelCatalog: loadChatModelCatalog(),
 	}
 
@@ -527,6 +529,12 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 		return
 	}
 
+	if m.memory != nil {
+		if prefErr := m.memory.upsertSpeechPreferences(ctx, agentID, userID, prefs); prefErr != nil {
+			log.Printf("llm: persist speech preferences: %v", prefErr)
+		}
+	}
+
 	var conv conversation
 	if err := m.db.WithContext(ctx).First(&conv, "id = ?", convID).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load conversation", "details": err.Error()})
@@ -581,11 +589,7 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 		return nil, err
 	}
 
-	if prefs.VoiceID == "" && contextData.agent.VoiceID != nil {
-		if voice := strings.TrimSpace(*contextData.agent.VoiceID); voice != "" {
-			prefs.VoiceID = voice
-		}
-	}
+	applyPreferenceDefaults(&prefs, contextData)
 
 	start := time.Now()
 	result, err := m.client.Chat(ctx, contextData.messages)
@@ -688,6 +692,14 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 		m.enqueueSpeechSynthesis(assistant.ID, conv, reply, selection, speed, pitch, emotionMeta)
 	}
 
+	if m.memory != nil {
+		if summary, err := m.memory.ensureSummary(ctx, conv); err != nil {
+			log.Printf("llm: update conversation summary: %v", err)
+		} else if summary != "" {
+			conv.Summary = &summary
+		}
+	}
+
 	return &record, nil
 }
 
@@ -721,6 +733,124 @@ func buildSystemPrompt(agent *agents.Agent, cfg *agents.AgentChatConfig) string 
 	}
 
 	return strings.Join(parts, "\n\n")
+}
+
+func applyPreferenceDefaults(prefs *speechPreferences, ctxData *conversationContext) {
+	if prefs == nil || ctxData == nil {
+		return
+	}
+
+	profile := ctxData.profile
+	if profile != nil {
+		if prefs.VoiceID == "" {
+			if voice := getPreferenceString(profile.Preferences, "voice_id"); voice != "" {
+				prefs.VoiceID = voice
+			}
+		}
+		if prefs.Provider == "" {
+			if provider := getPreferenceString(profile.Preferences, "voice_provider"); provider != "" {
+				prefs.Provider = provider
+			}
+		}
+		if prefs.EmotionHint == "" {
+			if hint := getPreferenceString(profile.Preferences, "emotion_hint"); hint != "" {
+				prefs.EmotionHint = hint
+			}
+		}
+		if prefs.Speed == 1.0 {
+			if speed, ok := getPreferenceFloat(profile.Preferences, "speech_speed"); ok && speed > 0 {
+				prefs.Speed = speed
+			}
+		}
+		if prefs.Pitch == 1.0 {
+			if pitch, ok := getPreferenceFloat(profile.Preferences, "speech_pitch"); ok && pitch > 0 {
+				prefs.Pitch = pitch
+			}
+		}
+	}
+
+	if prefs.Provider == "" && ctxData.agent.VoiceProvider != nil {
+		if provider := strings.TrimSpace(*ctxData.agent.VoiceProvider); provider != "" {
+			prefs.Provider = provider
+		}
+	}
+	if prefs.VoiceID == "" && ctxData.agent.VoiceID != nil {
+		if voice := strings.TrimSpace(*ctxData.agent.VoiceID); voice != "" {
+			prefs.VoiceID = voice
+		}
+	}
+}
+
+func getPreferenceString(prefs map[string]any, key string) string {
+	if prefs == nil {
+		return ""
+	}
+	value, ok := prefs[key]
+	if !ok {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
+	case json.Number:
+		return strings.TrimSpace(v.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
+func getPreferenceFloat(prefs map[string]any, key string) (float64, bool) {
+	if prefs == nil {
+		return 0, false
+	}
+	value, ok := prefs[key]
+	if !ok {
+		return 0, false
+	}
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case uint:
+		return float64(v), true
+	case uint32:
+		return float64(v), true
+	case uint64:
+		return float64(v), true
+	case json.Number:
+		f, err := v.Float64()
+		if err == nil {
+			return f, true
+		}
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return 0, false
+		}
+		f, err := strconv.ParseFloat(trimmed, 64)
+		if err == nil {
+			return f, true
+		}
+	default:
+		trimmed := strings.TrimSpace(fmt.Sprint(v))
+		if trimmed == "" {
+			return 0, false
+		}
+		f, err := strconv.ParseFloat(trimmed, 64)
+		if err == nil {
+			return f, true
+		}
+	}
+	return 0, false
 }
 
 func truncateString(value string, max int) string {

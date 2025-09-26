@@ -40,6 +40,20 @@ func (m *Module) DefaultVoiceID() string {
 	return m.client.DefaultVoiceID()
 }
 
+func (m *Module) DefaultProviderID() string {
+	if m == nil || m.client == nil {
+		return ""
+	}
+	return m.client.DefaultProviderID()
+}
+
+func (m *Module) Providers() []ProviderStatus {
+	if m == nil || m.client == nil {
+		return nil
+	}
+	return m.client.Providers()
+}
+
 func (m *Module) Voices() []VoiceOption {
 	if m == nil || m.client == nil {
 		return nil
@@ -55,10 +69,13 @@ func (m *Module) Synthesize(ctx context.Context, req SpeechRequest) (*SpeechResu
 }
 
 func (m *Module) handleVoices(c *gin.Context) {
+	providers := m.Providers()
 	c.JSON(http.StatusOK, gin.H{
-		"enabled":       m.Enabled(),
-		"default_voice": m.DefaultVoiceID(),
-		"voices":        m.Voices(),
+		"enabled":          m.Enabled(),
+		"default_voice":    m.DefaultVoiceID(),
+		"default_provider": m.DefaultProviderID(),
+		"providers":        providers,
+		"voices":           m.Voices(),
 	})
 }
 

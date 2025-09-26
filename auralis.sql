@@ -71,6 +71,7 @@ CREATE TABLE `agents`  (
   `first_turn_hint` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL,
   `live2d_model_id` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL COMMENT '关联的 Live2D 模型标识',
   `voice_id` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL COMMENT '绑定音色 ID',
+  `voice_provider` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL COMMENT '语音TTS供应商', 
   `status` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pending',
   `lang_default` varchar(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'zh-CN',
   `tags` json NULL,

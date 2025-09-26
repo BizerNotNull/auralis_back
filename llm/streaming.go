@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,6 +57,8 @@ func streamEvent(w gin.ResponseWriter, flusher http.Flusher, event string, paylo
 type conversationContext struct {
 	agent    agents.Agent
 	config   *agents.AgentChatConfig
+	profile  *userProfile
+	summary  string
 	history  []message
 	messages []ChatMessage
 }
@@ -74,21 +78,53 @@ func (m *Module) buildConversationContext(ctx context.Context, conv conversation
 		return nil, fmt.Errorf("load agent config: %w", cfgErr)
 	}
 
-	historyLimit := 20
+	limit := 20
+	if m.memory != nil {
+		limit = m.memory.recentMessageLimit()
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
 	var history []message
 	if err := m.db.WithContext(ctx).
 		Where("conversation_id = ?", conv.ID).
-		Order("seq ASC").
-		Limit(historyLimit).
+		Order("seq DESC").
+		Limit(limit).
 		Find(&history).Error; err != nil {
 		return nil, fmt.Errorf("load history: %w", err)
+	}
+	if len(history) > 1 {
+		for i, j := 0, len(history)-1; i < j; i, j = i+1, j-1 {
+			history[i], history[j] = history[j], history[i]
+		}
+	}
+
+	var summaryText string
+	if conv.Summary != nil {
+		summaryText = strings.TrimSpace(*conv.Summary)
+	}
+
+	var profile *userProfile
+	if m.memory != nil {
+		prof, err := m.memory.loadUserProfile(ctx, conv.AgentID, conv.UserID)
+		if err != nil {
+			return nil, fmt.Errorf("load user profile: %w", err)
+		}
+		profile = prof
 	}
 
 	systemPrompt := buildSystemPrompt(&agentModel, cfgPtr)
 
-	messages := make([]ChatMessage, 0, len(history)+1)
+	messages := make([]ChatMessage, 0, len(history)+3)
 	if systemPrompt != "" {
 		messages = append(messages, ChatMessage{Role: "system", Content: systemPrompt})
+	}
+	if summaryText != "" {
+		messages = append(messages, ChatMessage{Role: "system", Content: "Conversation memory summary:\n" + summaryText})
+	}
+	if prompt := profilePrompt(profile); prompt != "" {
+		messages = append(messages, ChatMessage{Role: "system", Content: prompt})
 	}
 
 	for _, item := range history {
@@ -102,9 +138,88 @@ func (m *Module) buildConversationContext(ctx context.Context, conv conversation
 	return &conversationContext{
 		agent:    agentModel,
 		config:   cfgPtr,
+		profile:  profile,
+		summary:  summaryText,
 		history:  history,
 		messages: messages,
 	}, nil
+}
+
+func profilePrompt(profile *userProfile) string {
+	if profile == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if summary := strings.TrimSpace(profile.Summary); summary != "" {
+		parts = append(parts, "User persona: "+summary)
+	}
+	if pref := formatPreferences(profile.Preferences); pref != "" {
+		parts = append(parts, "Known preferences: "+pref)
+	}
+	if last := strings.TrimSpace(profile.LastTask); last != "" {
+		parts = append(parts, "Outstanding task: "+last)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "User context:\n" + strings.Join(parts, "\n")
+}
+
+func formatPreferences(prefs map[string]any) string {
+	if len(prefs) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(prefs))
+	for key := range prefs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var builder strings.Builder
+	for i, key := range keys {
+		if i > 0 {
+			builder.WriteString("; ")
+		}
+		normalizedKey := strings.ReplaceAll(strings.TrimSpace(key), "_", " ")
+		builder.WriteString(normalizedKey)
+		builder.WriteString(": ")
+		builder.WriteString(stringifyPreferenceValue(prefs[key]))
+	}
+	return builder.String()
+}
+
+func stringifyPreferenceValue(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case float64:
+		return strconv.FormatFloat(v, 'f', 2, 64)
+	case float32:
+		return strconv.FormatFloat(float64(v), 'f', 2, 64)
+	case int:
+		return strconv.Itoa(v)
+	case int32:
+		return strconv.FormatInt(int64(v), 10)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case uint:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint32:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint64:
+		return strconv.FormatUint(v, 10)
+	case bool:
+		if v {
+			return "yes"
+		}
+		return "no"
+	default:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprint(v)
+		}
+		return string(raw)
+	}
 }
 
 func messageToRecord(msg message, conv conversation) messageRecord {
@@ -311,11 +426,7 @@ func (m *Module) handleCreateMessageStream(
 		return
 	}
 
-	if prefs.VoiceID == "" && contextData.agent.VoiceID != nil {
-		if voice := strings.TrimSpace(*contextData.agent.VoiceID); voice != "" {
-			prefs.VoiceID = voice
-		}
-	}
+	applyPreferenceDefaults(&prefs, contextData)
 
 	placeholder, err := m.createAssistantPlaceholder(ctx, conv, userMsg)
 	if err != nil {
@@ -497,6 +608,14 @@ func (m *Module) handleCreateMessageStream(
 
 	if speechEnabled {
 		m.enqueueSpeechSynthesis(placeholder.ID, conv, reply, selection, speed, pitch, emotionMeta)
+	}
+
+	if m.memory != nil {
+		if summary, err := m.memory.ensureSummary(ctx, conv); err != nil {
+			log.Printf("llm: update conversation summary: %v", err)
+		} else if summary != "" {
+			conv.Summary = &summary
+		}
 	}
 
 	_ = streamEvent(c.Writer, flusher, "done", gin.H{"id": placeholder.ID})
