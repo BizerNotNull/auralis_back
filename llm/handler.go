@@ -59,6 +59,8 @@ func RegisterRoutes(router *gin.Engine, synthesizer tts.Synthesizer) (*Module, e
 	group.GET("/models", module.handleListModels)
 	group.POST("/complete", module.handleComplete)
 	group.GET("/messages", module.handleRecentMessages)
+	group.GET("/messages/:id/speech", module.handleMessageSpeech)
+	group.GET("/messages/:id/speech/audio", module.handleMessageSpeechAudio)
 	group.POST("/messages", module.handleCreateMessage)
 
 	return module, nil
@@ -89,8 +91,9 @@ type completeRequest struct {
 }
 
 type completeResponse struct {
-	Prompt  string `json:"prompt"`
-	Content string `json:"content"`
+	Prompt  string     `json:"prompt"`
+	Content string     `json:"content"`
+	Usage   *ChatUsage `json:"usage,omitempty"`
 }
 
 func (m *Module) handleComplete(c *gin.Context) {
@@ -100,7 +103,7 @@ func (m *Module) handleComplete(c *gin.Context) {
 		return
 	}
 
-	content, err := m.client.Complete(c.Request.Context(), req.Prompt)
+	result, err := m.client.Complete(c.Request.Context(), req.Prompt)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
@@ -108,7 +111,8 @@ func (m *Module) handleComplete(c *gin.Context) {
 
 	c.JSON(http.StatusOK, completeResponse{
 		Prompt:  req.Prompt,
-		Content: content,
+		Content: result.Content,
+		Usage:   result.Usage,
 	})
 }
 
@@ -181,22 +185,185 @@ func (m *Module) handleRecentMessages(c *gin.Context) {
 	})
 }
 
+type messageSpeechRecord struct {
+	MessageID      uint64
+	ConversationID uint64
+	Extras         map[string]any
+}
+
+func normalizeString(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case json.Number:
+		return strings.TrimSpace(v.String())
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
+	case nil:
+		return ""
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
+func (m *Module) loadMessageSpeechRecord(ctx context.Context, messageID, agentID, userID uint64) (*messageSpeechRecord, error) {
+	var row struct {
+		ID             uint64
+		ConversationID uint64
+		Extras         datatypes.JSON
+	}
+
+	err := m.db.WithContext(ctx).
+		Table("messages").
+		Select("messages.id, messages.conversation_id, messages.extras").
+		Joins("JOIN conversations ON conversations.id = messages.conversation_id").
+		Where("messages.id = ? AND conversations.agent_id = ? AND conversations.user_id = ?", messageID, agentID, userID).
+		Take(&row).Error
+	if err != nil {
+		return nil, err
+	}
+
+	extraMap := make(map[string]any)
+	if len(row.Extras) > 0 {
+		if err := json.Unmarshal(row.Extras, &extraMap); err != nil {
+			log.Printf("llm: parse extras for message %d failed: %v", row.ID, err)
+			extraMap = make(map[string]any)
+		}
+	}
+
+	return &messageSpeechRecord{
+		MessageID:      row.ID,
+		ConversationID: row.ConversationID,
+		Extras:         extraMap,
+	}, nil
+}
+
+func (m *Module) ensureSpeechAudioURL(speech map[string]any) map[string]any {
+	if speech == nil {
+		return nil
+	}
+	trimmed := normalizeString(speech["audio_url"])
+	trimmedAlt := normalizeString(speech["audioUrl"])
+	if trimmed == "" && trimmedAlt == "" {
+		return speech
+	}
+	clone := make(map[string]any, len(speech))
+	for k, v := range speech {
+		if k == "audio_url" || k == "audioUrl" {
+			continue
+		}
+		clone[k] = v
+	}
+	return clone
+}
+
+func (m *Module) handleMessageSpeech(c *gin.Context) {
+	if m.db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
+		return
+	}
+
+	messageIDStr := strings.TrimSpace(c.Param("id"))
+	if messageIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "message id is required"})
+		return
+	}
+
+	messageID, err := strconv.ParseUint(messageIDStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid message id"})
+		return
+	}
+
+	agentIDStr := strings.TrimSpace(c.Query("agent_id"))
+	userIDStr := strings.TrimSpace(c.Query("user_id"))
+	if agentIDStr == "" || userIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "agent_id and user_id are required"})
+		return
+	}
+
+	agentID, err := strconv.ParseUint(agentIDStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid agent_id"})
+		return
+	}
+
+	userID, err := strconv.ParseUint(userIDStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id"})
+		return
+	}
+
+	record, err := m.loadMessageSpeechRecord(c.Request.Context(), messageID, agentID, userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "message not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load message", "details": err.Error()})
+		return
+	}
+
+	extraMap := record.Extras
+	status := normalizeString(extraMap["speech_status"])
+	if status == "" {
+		status = normalizeString(extraMap["speechStatus"])
+	}
+
+	var speechPayload any
+	if raw, ok := extraMap["speech"]; ok {
+		if speechMap, ok := raw.(map[string]any); ok {
+			speechPayload = m.ensureSpeechAudioURL(speechMap)
+		} else {
+			speechPayload = raw
+		}
+	}
+
+	speechError := normalizeString(extraMap["speech_error"])
+	if speechError == "" {
+		speechError = normalizeString(extraMap["speechError"])
+	}
+
+	response := gin.H{
+		"message_id":      record.MessageID,
+		"conversation_id": record.ConversationID,
+		"speech_status":   status,
+		"speech":          speechPayload,
+	}
+	if speechError != "" {
+		response["speech_error"] = speechError
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+func (m *Module) handleMessageSpeechAudio(c *gin.Context) {
+	c.JSON(http.StatusNotFound, gin.H{"error": "speech streaming disabled"})
+}
+
 type createMessageRequest struct {
-	AgentID     string   `json:"agent_id" binding:"required"`
-	UserID      string   `json:"user_id" binding:"required"`
-	Role        string   `json:"role" binding:"required"`
-	Content     string   `json:"content" binding:"required"`
-	VoiceID     string   `json:"voice_id"`
-	EmotionHint string   `json:"emotion_hint"`
-	SpeechSpeed *float64 `json:"speech_speed,omitempty"`
-	SpeechPitch *float64 `json:"speech_pitch,omitempty"`
+	AgentID       string   `json:"agent_id" binding:"required"`
+	UserID        string   `json:"user_id" binding:"required"`
+	Role          string   `json:"role" binding:"required"`
+	Content       string   `json:"content" binding:"required"`
+	VoiceID       string   `json:"voice_id"`
+	VoiceProvider string   `json:"voice_provider"`
+	EmotionHint   string   `json:"emotion_hint"`
+	SpeechSpeed   *float64 `json:"speech_speed,omitempty"`
+	SpeechPitch   *float64 `json:"speech_pitch,omitempty"`
 }
 
 type speechPreferences struct {
 	VoiceID     string
+	Provider    string
 	EmotionHint string
 	Speed       float64
 	Pitch       float64
+}
+
+type voiceSelection struct {
+	ID       string
+	Provider string
 }
 
 type emotionMetadata struct {
@@ -254,6 +421,7 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 
 	prefs := speechPreferences{
 		VoiceID:     strings.TrimSpace(req.VoiceID),
+		Provider:    strings.TrimSpace(req.VoiceProvider),
 		EmotionHint: strings.TrimSpace(req.EmotionHint),
 		Speed:       1.0,
 		Pitch:       1.0,
@@ -413,8 +581,14 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 		return nil, err
 	}
 
+	if prefs.VoiceID == "" && contextData.agent.VoiceID != nil {
+		if voice := strings.TrimSpace(*contextData.agent.VoiceID); voice != "" {
+			prefs.VoiceID = voice
+		}
+	}
+
 	start := time.Now()
-	reply, err := m.client.Chat(ctx, contextData.messages)
+	result, err := m.client.Chat(ctx, contextData.messages)
 	if err != nil {
 		short := truncateString(err.Error(), 256)
 		_ = m.db.WithContext(ctx).Model(&message{}).Where("id = ?", userMsg.ID).Updates(map[string]any{
@@ -423,11 +597,15 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 		})
 		return nil, err
 	}
+	reply := result.Content
+	usage := result.Usage
 
 	latency := int(time.Since(start).Milliseconds())
 	parentID := userMsg.ID
 
-	voiceID := resolveVoiceID(prefs.VoiceID, m.tts)
+	selection := resolveVoiceSelection(prefs.VoiceID, prefs.Provider, m.tts)
+	prefs.Provider = selection.Provider
+	voiceID := selection.ID
 	speed := sanitizeSpeed(prefs.Speed)
 	pitch := sanitizePitch(prefs.Pitch)
 	emotionMeta := inferEmotion(reply, prefs.EmotionHint)
@@ -437,11 +615,15 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 		extrasPayload["emotion"] = emotionMeta
 	}
 	if voiceID != "" || speed != 1.0 || pitch != 1.0 {
-		extrasPayload["speech_preferences"] = map[string]any{
+		prefsMap := map[string]any{
 			"voice_id": voiceID,
 			"speed":    speed,
 			"pitch":    pitch,
 		}
+		if selection.Provider != "" {
+			prefsMap["provider"] = selection.Provider
+		}
+		extrasPayload["speech_preferences"] = prefsMap
 	}
 	speechEnabled := m.tts != nil && m.tts.Enabled()
 	if speechEnabled {
@@ -457,6 +639,15 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 	}
 	if latency > 0 {
 		assistant.LatencyMs = &latency
+	}
+
+	if usage != nil {
+		if ptr := intPointerIfPositive(usage.PromptTokens); ptr != nil {
+			assistant.TokenInput = ptr
+		}
+		if ptr := intPointerIfPositive(usage.CompletionTokens); ptr != nil {
+			assistant.TokenOutput = ptr
+		}
 	}
 
 	if len(extrasPayload) > 0 {
@@ -487,10 +678,14 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 		return nil, err
 	}
 
+	if usage != nil {
+		m.incrementConversationTokens(ctx, conv.ID, usage)
+	}
+
 	record := messageToRecord(assistant, conv)
 
 	if speechEnabled {
-		m.enqueueSpeechSynthesis(assistant.ID, conv, reply, voiceID, speed, pitch, emotionMeta)
+		m.enqueueSpeechSynthesis(assistant.ID, conv, reply, selection, speed, pitch, emotionMeta)
 	}
 
 	return &record, nil
@@ -550,20 +745,64 @@ func toRawMessage(data datatypes.JSON) json.RawMessage {
 	return json.RawMessage(clone)
 }
 
-func resolveVoiceID(candidate string, synth tts.Synthesizer) string {
-	trimmed := strings.TrimSpace(candidate)
-	if trimmed != "" {
-		return trimmed
+func resolveVoiceSelection(candidateID string, candidateProvider string, synth tts.Synthesizer) voiceSelection {
+	selection := voiceSelection{
+		ID:       strings.TrimSpace(candidateID),
+		Provider: normalizeVoiceProvider(candidateProvider),
 	}
-	if synth != nil {
-		if voice := strings.TrimSpace(synth.DefaultVoiceID()); voice != "" {
-			return voice
+	if synth == nil {
+		return selection
+	}
+
+	voices := synth.Voices()
+	if selection.ID != "" {
+		if selection.Provider == "" {
+			selection.Provider = normalizeVoiceProvider(providerForVoiceOption(voices, selection.ID))
 		}
-		if voices := synth.Voices(); len(voices) > 0 {
-			return strings.TrimSpace(voices[0].ID)
+		if selection.Provider != "" {
+			return selection
+		}
+	}
+
+	if selection.ID == "" {
+		selection.ID = strings.TrimSpace(synth.DefaultVoiceID())
+	}
+	if selection.Provider == "" && selection.ID != "" {
+		selection.Provider = normalizeVoiceProvider(providerForVoiceOption(voices, selection.ID))
+	}
+	if selection.ID == "" && len(voices) > 0 {
+		selection.ID = strings.TrimSpace(voices[0].ID)
+		selection.Provider = normalizeVoiceProvider(voices[0].Provider)
+	} else if selection.Provider == "" && len(voices) > 0 {
+		selection.Provider = normalizeVoiceProvider(voices[0].Provider)
+	}
+
+	return selection
+}
+
+func providerForVoiceOption(options []tts.VoiceOption, id string) string {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return ""
+	}
+	for _, option := range options {
+		if strings.EqualFold(option.ID, trimmed) {
+			return option.Provider
 		}
 	}
 	return ""
+}
+
+func normalizeVoiceProvider(value string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	switch trimmed {
+	case "", "qiniu", "qiniu-openai", "qiniu_openai", "qiniuopenai":
+		return "qiniu-openai"
+	case "aliyun", "ali", "aliyun-cosyvoice", "aliyun_cosyvoice", "cosyvoice", "cosy-voice":
+		return "aliyun-cosyvoice"
+	default:
+		return trimmed
+	}
 }
 
 func sanitizeSpeed(value float64) float64 {

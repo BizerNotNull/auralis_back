@@ -25,12 +25,14 @@ type VoiceSettings struct {
 }
 
 type SpeechRequest struct {
-	Text    string
-	VoiceID string
-	Emotion string
-	Speed   float64
-	Pitch   float64
-	Format  string
+	Text         string
+	VoiceID      string
+	Provider     string
+	Emotion      string
+	Speed        float64
+	Pitch        float64
+	Format       string
+	Instructions string
 }
 
 type SpeechResult struct {
@@ -42,6 +44,7 @@ type SpeechResult struct {
 	Pitch       float64 `json:"pitch,omitempty"`
 	Provider    string  `json:"provider"`
 	DurationMs  int     `json:"duration_ms,omitempty"`
+	AudioURL    string  `json:"audio_url,omitempty"`
 }
 
 func (r *SpeechResult) AsMap() map[string]any {
@@ -53,6 +56,9 @@ func (r *SpeechResult) AsMap() map[string]any {
 		"audio_base64": r.AudioBase64,
 		"mime_type":    r.MimeType,
 		"provider":     r.Provider,
+	}
+	if r.AudioURL != "" {
+		payload["audio_url"] = r.AudioURL
 	}
 	if r.Emotion != "" {
 		payload["emotion"] = r.Emotion

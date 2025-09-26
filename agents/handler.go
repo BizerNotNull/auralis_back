@@ -165,6 +165,7 @@ type createAgentRequest struct {
 	OpeningLine      *string  `json:"opening_line"`
 	FirstTurnHint    *string  `json:"first_turn_hint"`
 	Live2DModelID    *string  `json:"live2d_model_id"`
+	VoiceID          string   `json:"voice_id"`
 	LangDefault      string   `json:"lang_default"`
 	Tags             []string `json:"tags"`
 	Notes            *string  `json:"notes"`
@@ -185,6 +186,7 @@ type updateAgentRequest struct {
 	OpeningLine      *string   `json:"opening_line"`
 	FirstTurnHint    *string   `json:"first_turn_hint"`
 	Live2DModelID    *string   `json:"live2d_model_id"`
+	VoiceID          *string   `json:"voice_id"`
 	LangDefault      *string   `json:"lang_default"`
 	Tags             *[]string `json:"tags"`
 	Notes            *string   `json:"notes"`
@@ -252,6 +254,10 @@ func (m *Module) handleCreateAgent(c *gin.Context) {
 	agent.OpeningLine = normalizeStringPointer(req.OpeningLine)
 	agent.FirstTurnHint = normalizeStringPointer(req.FirstTurnHint)
 	agent.Live2DModelID = normalizeStringPointer(req.Live2DModelID)
+	if voice := strings.TrimSpace(req.VoiceID); voice != "" {
+		voiceCopy := voice
+		agent.VoiceID = &voiceCopy
+	}
 	agent.Notes = normalizeStringPointer(req.Notes)
 
 	if len(req.Tags) > 0 {
@@ -447,6 +453,9 @@ func (m *Module) handleUpdateAgent(c *gin.Context) {
 	}
 	if req.Live2DModelID != nil {
 		agentUpdates["live2d_model_id"] = normalizeStringPointer(req.Live2DModelID)
+	}
+	if req.VoiceID != nil {
+		agentUpdates["voice_id"] = normalizeStringPointer(req.VoiceID)
 	}
 	if req.Notes != nil {
 		agentUpdates["notes"] = normalizeStringPointer(req.Notes)
@@ -1566,6 +1575,7 @@ func bindCreateAgentRequest(c *gin.Context) (createAgentRequest, *multipart.File
 		req.OpeningLine = optionalStringPointer(form.Value["opening_line"])
 		req.FirstTurnHint = optionalStringPointer(form.Value["first_turn_hint"])
 		req.Live2DModelID = optionalStringPointer(form.Value["live2d_model_id"])
+		req.VoiceID = firstFormValue(form.Value["voice_id"])
 		req.Notes = optionalStringPointer(form.Value["notes"])
 		req.SystemPrompt = optionalStringPointer(form.Value["system_prompt"])
 
@@ -1627,6 +1637,7 @@ func bindUpdateAgentRequest(c *gin.Context) (updateAgentRequest, *multipart.File
 		req.OpeningLine = formStringPointer(form.Value["opening_line"])
 		req.FirstTurnHint = formStringPointer(form.Value["first_turn_hint"])
 		req.Live2DModelID = formStringPointer(form.Value["live2d_model_id"])
+		req.VoiceID = formStringPointer(form.Value["voice_id"])
 		req.LangDefault = formStringPointer(form.Value["lang_default"])
 		req.Notes = formStringPointer(form.Value["notes"])
 		req.ModelProvider = formStringPointer(form.Value["model_provider"])
