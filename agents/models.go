@@ -16,6 +16,7 @@ type Agent struct {
 	OpeningLine      *string        `gorm:"type:text" json:"opening_line,omitempty"`
 	FirstTurnHint    *string        `gorm:"type:text" json:"first_turn_hint,omitempty"`
 	Live2DModelID    *string        `gorm:"size:100" json:"live2d_model_id,omitempty"`
+	VoiceID          *string        `gorm:"size:100" json:"voice_id,omitempty"`
 	AvatarURL        *string        `gorm:"size:255" json:"avatar_url,omitempty"`
 	Status           string         `gorm:"size:16;not null;default:'pending'" json:"status"`
 	LangDefault      string         `gorm:"size:10;not null;default:'zh-CN'" json:"lang_default"`
