@@ -3,6 +3,7 @@ package tts
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -62,12 +63,13 @@ func (m *Module) handleVoices(c *gin.Context) {
 }
 
 type previewRequest struct {
-	Text    string   `json:"text" binding:"required"`
-	VoiceID string   `json:"voice_id"`
-	Emotion string   `json:"emotion"`
-	Speed   *float64 `json:"speed"`
-	Pitch   *float64 `json:"pitch"`
-	Format  string   `json:"format"`
+	Text     string   `json:"text" binding:"required"`
+	VoiceID  string   `json:"voice_id"`
+	Provider string   `json:"provider"`
+	Emotion  string   `json:"emotion"`
+	Speed    *float64 `json:"speed"`
+	Pitch    *float64 `json:"pitch"`
+	Format   string   `json:"format"`
 }
 
 func (m *Module) handlePreview(c *gin.Context) {
@@ -93,12 +95,16 @@ func (m *Module) handlePreview(c *gin.Context) {
 	}
 
 	speechReq := SpeechRequest{
-		Text:    req.Text,
-		VoiceID: strings.TrimSpace(req.VoiceID),
-		Emotion: strings.TrimSpace(req.Emotion),
-		Speed:   speed,
-		Pitch:   pitch,
-		Format:  strings.TrimSpace(req.Format),
+		Text:     req.Text,
+		VoiceID:  strings.TrimSpace(req.VoiceID),
+		Provider: strings.TrimSpace(req.Provider),
+		Emotion:  strings.TrimSpace(req.Emotion),
+		Speed:    speed,
+		Pitch:    pitch,
+		Format:   strings.TrimSpace(req.Format),
+	}
+	if speechReq.Emotion != "" {
+		speechReq.Instructions = fmt.Sprintf("Please speak with a %s tone.", speechReq.Emotion)
 	}
 
 	result, err := m.client.Synthesize(c.Request.Context(), speechReq)

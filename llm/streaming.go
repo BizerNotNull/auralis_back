@@ -180,25 +180,33 @@ func (m *Module) createAssistantPlaceholder(ctx context.Context, conv conversati
 	return created, err
 }
 
-func (m *Module) enqueueSpeechSynthesis(msgID uint64, conv conversation, content string, voiceID string, speed, pitch float64, emotion *emotionMetadata) {
+func (m *Module) enqueueSpeechSynthesis(msgID uint64, conv conversation, content string, selection voiceSelection, speed, pitch float64, emotion *emotionMetadata) {
 	if m.tts == nil || !m.tts.Enabled() {
 		return
 	}
 
-	baseVoiceID := voiceID
+	provider := normalizeVoiceProvider(selection.Provider)
+	baseVoiceID := strings.TrimSpace(selection.ID)
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 		defer cancel()
 
+		providerLocal := provider
+		voiceID := baseVoiceID
+
 		req := tts.SpeechRequest{
-			Text:    content,
-			VoiceID: baseVoiceID,
-			Speed:   speed,
-			Pitch:   pitch,
+			Text:     content,
+			VoiceID:  voiceID,
+			Provider: providerLocal,
+			Speed:    speed,
+			Pitch:    pitch,
 		}
 		if emotion != nil {
 			req.Emotion = emotion.Label
+			if strings.TrimSpace(req.Instructions) == "" {
+				req.Instructions = fmt.Sprintf("Please speak with a %s tone.", emotion.Label)
+			}
 		}
 
 		result, err := m.tts.Synthesize(ctx, req)
@@ -209,7 +217,11 @@ func (m *Module) enqueueSpeechSynthesis(msgID uint64, conv conversation, content
 			updates["speech_error"] = err.Error()
 			log.Printf("llm: synthesize speech async failed: %v", err)
 		} else if result != nil {
+			result.AudioURL = ""
 			updates["speech"] = result.AsMap()
+			if strings.TrimSpace(result.Provider) != "" {
+				providerLocal = normalizeVoiceProvider(result.Provider)
+			}
 			if voiceID == "" {
 				voiceID = result.VoiceID
 			}
@@ -236,11 +248,19 @@ func (m *Module) enqueueSpeechSynthesis(msgID uint64, conv conversation, content
 		for k, v := range updates {
 			extrasMap[k] = v
 		}
+		prefsMap, ok := extrasMap["speech_preferences"].(map[string]any)
+		if !ok || prefsMap == nil {
+			prefsMap = make(map[string]any)
+			extrasMap["speech_preferences"] = prefsMap
+		}
 		if voiceID != "" {
-			if prefs, ok := extrasMap["speech_preferences"].(map[string]any); ok {
-				if existing, ok := prefs["voice_id"].(string); !ok || strings.TrimSpace(existing) == "" {
-					prefs["voice_id"] = voiceID
-				}
+			if existing, ok := prefsMap["voice_id"].(string); !ok || strings.TrimSpace(existing) == "" {
+				prefsMap["voice_id"] = voiceID
+			}
+		}
+		if providerLocal != "" {
+			if existing, ok := prefsMap["provider"].(string); !ok || strings.TrimSpace(existing) == "" {
+				prefsMap["provider"] = providerLocal
 			}
 		}
 
@@ -289,6 +309,12 @@ func (m *Module) handleCreateMessageStream(
 		c.Status(http.StatusInternalServerError)
 		_ = streamEvent(c.Writer, flusher, "error", gin.H{"error": err.Error()})
 		return
+	}
+
+	if prefs.VoiceID == "" && contextData.agent.VoiceID != nil {
+		if voice := strings.TrimSpace(*contextData.agent.VoiceID); voice != "" {
+			prefs.VoiceID = voice
+		}
 	}
 
 	placeholder, err := m.createAssistantPlaceholder(ctx, conv, userMsg)
@@ -350,15 +376,18 @@ func (m *Module) handleCreateMessageStream(
 		return streamEvent(c.Writer, flusher, "assistant_delta", payload)
 	}
 
-	reply, streamErr := m.client.ChatStream(ctx, contextData.messages, streamHandler)
+	streamResult, streamErr := m.client.ChatStream(ctx, contextData.messages, streamHandler)
+	reply := streamResult.Content
+	usage := streamResult.Usage
 	if streamErr != nil {
 		log.Printf("llm: streaming fallback to non-streaming: %v", streamErr)
-		fullReply, err := m.client.Chat(ctx, contextData.messages)
+		fallback, err := m.client.Chat(ctx, contextData.messages)
 		if err != nil {
 			_ = streamEvent(c.Writer, flusher, "error", gin.H{"error": err.Error()})
 			return
 		}
-		reply = fullReply
+		reply = fallback.Content
+		usage = fallback.Usage
 		if err := updateContent(reply); err != nil {
 			_ = streamEvent(c.Writer, flusher, "error", gin.H{"error": "failed to update assistant message"})
 			return
@@ -385,6 +414,25 @@ func (m *Module) handleCreateMessageStream(
 		return
 	}
 
+	if usage != nil {
+		updates := make(map[string]any, 2)
+		if usage.PromptTokens > 0 {
+			placeholder.TokenInput = intPointerIfPositive(usage.PromptTokens)
+			updates["token_input"] = usage.PromptTokens
+		}
+		if usage.CompletionTokens > 0 {
+			placeholder.TokenOutput = intPointerIfPositive(usage.CompletionTokens)
+			updates["token_output"] = usage.CompletionTokens
+		}
+		if len(updates) > 0 {
+			if err := m.db.WithContext(ctx).Model(&message{}).Where("id = ?", placeholder.ID).Updates(updates).Error; err != nil {
+				log.Printf("llm: failed to update token usage: %v", err)
+			} else {
+				m.incrementConversationTokens(ctx, conv.ID, usage)
+			}
+		}
+	}
+
 	latency := int(time.Since(start).Milliseconds())
 	if err := m.db.WithContext(ctx).
 		Model(&message{}).
@@ -394,7 +442,9 @@ func (m *Module) handleCreateMessageStream(
 		log.Printf("llm: failed to update latency: %v", err)
 	}
 
-	voiceID := resolveVoiceID(prefs.VoiceID, m.tts)
+	selection := resolveVoiceSelection(prefs.VoiceID, prefs.Provider, m.tts)
+	prefs.Provider = selection.Provider
+	voiceID := selection.ID
 	speed := sanitizeSpeed(prefs.Speed)
 	pitch := sanitizePitch(prefs.Pitch)
 	emotionMeta := inferEmotion(reply, prefs.EmotionHint)
@@ -404,11 +454,15 @@ func (m *Module) handleCreateMessageStream(
 		extrasPayload["emotion"] = emotionMeta
 	}
 	if voiceID != "" || speed != 1.0 || pitch != 1.0 {
-		extrasPayload["speech_preferences"] = map[string]any{
+		prefsMap := map[string]any{
 			"voice_id": voiceID,
 			"speed":    speed,
 			"pitch":    pitch,
 		}
+		if selection.Provider != "" {
+			prefsMap["provider"] = selection.Provider
+		}
+		extrasPayload["speech_preferences"] = prefsMap
 	}
 	speechEnabled := m.tts != nil && m.tts.Enabled()
 	if speechEnabled {
@@ -442,7 +496,7 @@ func (m *Module) handleCreateMessageStream(
 	}
 
 	if speechEnabled {
-		m.enqueueSpeechSynthesis(placeholder.ID, conv, reply, voiceID, speed, pitch, emotionMeta)
+		m.enqueueSpeechSynthesis(placeholder.ID, conv, reply, selection, speed, pitch, emotionMeta)
 	}
 
 	_ = streamEvent(c.Writer, flusher, "done", gin.H{"id": placeholder.ID})
