@@ -68,6 +68,13 @@ func (m *Module) Synthesize(ctx context.Context, req SpeechRequest) (*SpeechResu
 	return m.client.Synthesize(ctx, req)
 }
 
+func (m *Module) Stream(ctx context.Context, req SpeechStreamRequest) (SpeechStreamSession, error) {
+	if m == nil || m.client == nil {
+		return nil, ErrDisabled
+	}
+	return m.client.Stream(ctx, req)
+}
+
 func (m *Module) handleVoices(c *gin.Context) {
 	providers := m.Providers()
 	c.JSON(http.StatusOK, gin.H{

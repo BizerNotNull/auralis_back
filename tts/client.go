@@ -142,6 +142,50 @@ func (c *Client) Synthesize(ctx context.Context, req SpeechRequest) (*SpeechResu
 	}
 }
 
+func (c *Client) Stream(ctx context.Context, req SpeechStreamRequest) (SpeechStreamSession, error) {
+	if c == nil {
+		return nil, ErrDisabled
+	}
+	if !c.Enabled() {
+		return nil, ErrDisabled
+	}
+
+	provider := NormalizeProviderID(req.Provider)
+	voiceID := strings.TrimSpace(req.VoiceID)
+	if provider == "" && voiceID != "" {
+		if mapped, ok := c.voiceIndex[strings.ToLower(voiceID)]; ok {
+			provider = mapped
+		}
+	}
+	if provider == "" {
+		provider = c.defaultProvider
+	}
+
+	switch provider {
+	case "", "qiniu-openai":
+		return nil, fmt.Errorf("tts: streaming not supported for provider %q", provider)
+	case "aliyun-cosyvoice":
+		if c.cosy == nil || !c.cosy.Enabled() {
+			return nil, ErrDisabled
+		}
+		if voiceID == "" {
+			voiceID = c.cosy.DefaultVoiceID()
+			if voiceID == "" {
+				voiceID = c.defaultVoice
+			}
+		}
+		if voiceID == "" {
+			return nil, errors.New("tts: cosyvoice default voice not configured")
+		}
+		req.VoiceID = voiceID
+		req.ResolvedVoice = c.voiceOption(voiceID)
+		req.Provider = c.cosy.ProviderID()
+		return c.cosy.Stream(ctx, req)
+	default:
+		return nil, fmt.Errorf("tts: streaming not supported for provider %q", provider)
+	}
+}
+
 func (c *Client) voiceOption(id string) *VoiceOption {
 	if c == nil {
 		return nil

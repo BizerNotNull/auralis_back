@@ -3,7 +3,9 @@ package llm
 import (
 	"auralis_back/agents"
 	"auralis_back/tts"
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -52,6 +55,22 @@ func streamEvent(w gin.ResponseWriter, flusher http.Flusher, event string, paylo
 	}
 	flusher.Flush()
 	return nil
+}
+
+type safeSSEWriter struct {
+	writer  gin.ResponseWriter
+	flusher http.Flusher
+	mu      sync.Mutex
+}
+
+func newSafeSSEWriter(w gin.ResponseWriter, flusher http.Flusher) *safeSSEWriter {
+	return &safeSSEWriter{writer: w, flusher: flusher}
+}
+
+func (w *safeSSEWriter) Send(event string, payload any) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return streamEvent(w.writer, w.flusher, event, payload)
 }
 
 type conversationContext struct {
@@ -428,6 +447,18 @@ func (m *Module) handleCreateMessageStream(
 
 	applyPreferenceDefaults(&prefs, contextData)
 
+	prefs.Speed = sanitizeSpeed(prefs.Speed)
+	prefs.Pitch = sanitizePitch(prefs.Pitch)
+	prefs.EmotionHint = strings.TrimSpace(prefs.EmotionHint)
+
+	selection := resolveVoiceSelection(prefs.VoiceID, prefs.Provider, m.tts)
+	prefs.Provider = selection.Provider
+	if strings.TrimSpace(prefs.VoiceID) == "" {
+		prefs.VoiceID = selection.ID
+	}
+
+	speechEnabled := m.tts != nil && m.tts.Enabled()
+
 	placeholder, err := m.createAssistantPlaceholder(ctx, conv, userMsg)
 	if err != nil {
 		c.Status(http.StatusInternalServerError)
@@ -441,12 +472,14 @@ func (m *Module) handleCreateMessageStream(
 	c.Writer.Header().Set("Cache-Control", "no-cache, no-transform")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Status(http.StatusCreated)
+
+	writer := newSafeSSEWriter(c.Writer, flusher)
 	flusher.Flush()
 
-	if err := streamEvent(c.Writer, flusher, "user_message", userRecord); err != nil {
+	if err := writer.Send("user_message", userRecord); err != nil {
 		return
 	}
-	if err := streamEvent(c.Writer, flusher, "assistant_placeholder", assistantRecord); err != nil {
+	if err := writer.Send("assistant_placeholder", assistantRecord); err != nil {
 		return
 	}
 
@@ -460,17 +493,174 @@ func (m *Module) handleCreateMessageStream(
 			Error
 	}
 
+	var (
+		streamingSynth      tts.StreamingSynthesizer
+		streamSession       tts.SpeechStreamSession
+		streamWG            sync.WaitGroup
+		streamBuf           bytes.Buffer
+		streamMeta          tts.SpeechStreamMetadata
+		streamErr           error
+		streamErrMu         sync.Mutex
+		streamStarted       bool
+		streamActive        bool
+		streamFinalize      bool
+		initialSpeechStatus = "pending"
+	)
+
+	setStreamError := func(e error) {
+		if e == nil {
+			return
+		}
+		streamErrMu.Lock()
+		if streamErr == nil {
+			streamErr = e
+		}
+		streamErrMu.Unlock()
+	}
+
+	sendStreamProblem := func(message string) {
+		payload := gin.H{"id": placeholder.ID}
+		if message != "" {
+			payload["error"] = message
+		}
+		if err := writer.Send("speech_stream_failed", payload); err != nil {
+			log.Printf("llm: send speech_stream_failed failed: %v", err)
+		}
+	}
+
+	if speechEnabled {
+		if synth, ok := m.tts.(tts.StreamingSynthesizer); ok {
+			streamingSynth = synth
+		}
+	}
+
+	var resolvedVoice *tts.VoiceOption
+	if selection.ID != "" && m.tts != nil {
+		for _, option := range m.tts.Voices() {
+			if strings.EqualFold(option.ID, selection.ID) {
+				clone := option
+				resolvedVoice = &clone
+				break
+			}
+		}
+	}
+
+	if speechEnabled && streamingSynth != nil && selection.Provider == "aliyun-cosyvoice" && selection.ID != "" {
+		req := tts.SpeechStreamRequest{
+			VoiceID:       selection.ID,
+			Provider:      selection.Provider,
+			Emotion:       prefs.EmotionHint,
+			Speed:         prefs.Speed,
+			Pitch:         prefs.Pitch,
+			Instructions:  "",
+			ResolvedVoice: resolvedVoice,
+		}
+		if req.Emotion != "" {
+			req.Instructions = fmt.Sprintf("Please speak with a %s tone.", req.Emotion)
+		}
+		if resolvedVoice != nil {
+			if req.Format == "" && strings.TrimSpace(resolvedVoice.Format) != "" {
+				req.Format = resolvedVoice.Format
+			}
+		}
+
+		session, err := streamingSynth.Stream(ctx, req)
+		if err != nil {
+			log.Printf("llm: start streaming speech failed: %v", err)
+		} else {
+			streamSession = session
+			streamStarted = true
+			streamActive = true
+			streamFinalize = true
+			initialSpeechStatus = "streaming"
+
+			meta := session.Metadata()
+			if strings.TrimSpace(meta.VoiceID) == "" {
+				meta.VoiceID = selection.ID
+			}
+			if strings.TrimSpace(meta.Provider) == "" {
+				meta.Provider = selection.Provider
+			}
+			if strings.TrimSpace(meta.MimeType) == "" {
+				meta.MimeType = mimeForAudioFormat(meta.Format)
+			}
+			streamMeta = meta
+
+			metaPayload := gin.H{
+				"id":              placeholder.ID,
+				"conversation_id": conv.ID,
+				"voice_id":        meta.VoiceID,
+				"provider":        meta.Provider,
+				"format":          meta.Format,
+				"mime_type":       meta.MimeType,
+				"sample_rate":     meta.SampleRate,
+				"speed":           meta.Speed,
+				"pitch":           meta.Pitch,
+			}
+			if meta.Emotion != "" {
+				metaPayload["emotion"] = meta.Emotion
+			} else if req.Emotion != "" {
+				metaPayload["emotion"] = req.Emotion
+			}
+			if err := writer.Send("speech_stream_started", metaPayload); err != nil {
+				log.Printf("llm: send speech_stream_started failed: %v", err)
+			}
+
+			streamWG.Add(1)
+			go func() {
+				defer streamWG.Done()
+				defer session.Close()
+				for chunk := range session.Audio() {
+					if len(chunk.Audio) == 0 {
+						continue
+					}
+					if _, err := streamBuf.Write(chunk.Audio); err != nil {
+						log.Printf("llm: buffer speech chunk failed: %v", err)
+					}
+					encoded := base64.StdEncoding.EncodeToString(chunk.Audio)
+					chunkPayload := gin.H{
+						"id":              placeholder.ID,
+						"conversation_id": conv.ID,
+						"sequence":        chunk.Sequence,
+						"audio_base64":    encoded,
+					}
+					if err := writer.Send("speech_stream_chunk", chunkPayload); err != nil {
+						log.Printf("llm: send speech_stream_chunk failed: %v", err)
+					}
+				}
+				if err := session.Err(); err != nil {
+					setStreamError(err)
+				}
+			}()
+		}
+	}
+
+	needAsyncSpeech := speechEnabled && !streamStarted
+
 	streamHandler := func(delta ChatStreamDelta) error {
 		if delta.Content != "" {
 			if err := updateContent(delta.FullContent); err != nil {
 				return err
 			}
 		}
+
+		if streamSession != nil && streamActive && delta.Content != "" {
+			if err := streamSession.AppendText(ctx, delta.Content); err != nil {
+				setStreamError(fmt.Errorf("tts: streaming append failed: %w", err))
+				streamActive = false
+				streamFinalize = false
+				needAsyncSpeech = speechEnabled
+				sendStreamProblem("speech streaming interrupted")
+				_ = streamSession.Close()
+			}
+		}
+
 		if delta.Content == "" && !delta.Done {
 			if delta.FinishReason == "" {
 				return nil
 			}
 		}
+
 		payload := gin.H{
 			"id":   placeholder.ID,
 			"full": delta.FullContent,
@@ -484,7 +674,7 @@ func (m *Module) handleCreateMessageStream(
 		if delta.Done {
 			payload["done"] = true
 		}
-		return streamEvent(c.Writer, flusher, "assistant_delta", payload)
+		return writer.Send("assistant_delta", payload)
 	}
 
 	streamResult, streamErr := m.client.ChatStream(ctx, contextData.messages, streamHandler)
@@ -494,13 +684,13 @@ func (m *Module) handleCreateMessageStream(
 		log.Printf("llm: streaming fallback to non-streaming: %v", streamErr)
 		fallback, err := m.client.Chat(ctx, contextData.messages)
 		if err != nil {
-			_ = streamEvent(c.Writer, flusher, "error", gin.H{"error": err.Error()})
+			_ = writer.Send("error", gin.H{"error": err.Error()})
 			return
 		}
 		reply = fallback.Content
 		usage = fallback.Usage
 		if err := updateContent(reply); err != nil {
-			_ = streamEvent(c.Writer, flusher, "error", gin.H{"error": "failed to update assistant message"})
+			_ = writer.Send("error", gin.H{"error": "failed to update assistant message"})
 			return
 		}
 		if err := streamHandler(ChatStreamDelta{Content: reply, FullContent: reply, Done: true}); err != nil {
@@ -514,14 +704,10 @@ func (m *Module) handleCreateMessageStream(
 			reply = refreshed.Content
 			placeholder = refreshed
 		}
-	} else {
-		if err := m.db.WithContext(ctx).First(&placeholder, "id = ?", placeholder.ID).Error; err != nil {
-			log.Printf("llm: failed to reload assistant message: %v", err)
-		}
 	}
 
 	if reply == "" {
-		_ = streamEvent(c.Writer, flusher, "error", gin.H{"error": "assistant reply empty"})
+		_ = writer.Send("error", gin.H{"error": "assistant reply empty"})
 		return
 	}
 
@@ -553,31 +739,33 @@ func (m *Module) handleCreateMessageStream(
 		log.Printf("llm: failed to update latency: %v", err)
 	}
 
-	selection := resolveVoiceSelection(prefs.VoiceID, prefs.Provider, m.tts)
-	prefs.Provider = selection.Provider
-	voiceID := selection.ID
-	speed := sanitizeSpeed(prefs.Speed)
-	pitch := sanitizePitch(prefs.Pitch)
 	emotionMeta := inferEmotion(reply, prefs.EmotionHint)
 
 	extrasPayload := make(map[string]any)
 	if emotionMeta != nil {
 		extrasPayload["emotion"] = emotionMeta
 	}
-	if voiceID != "" || speed != 1.0 || pitch != 1.0 {
-		prefsMap := map[string]any{
-			"voice_id": voiceID,
-			"speed":    speed,
-			"pitch":    pitch,
+	if selection.ID != "" || prefs.Speed != 1.0 || prefs.Pitch != 1.0 {
+		prefsMap := map[string]any{}
+		if selection.ID != "" {
+			prefsMap["voice_id"] = selection.ID
 		}
 		if selection.Provider != "" {
 			prefsMap["provider"] = selection.Provider
 		}
+		if prefs.Speed > 0 {
+			prefsMap["speed"] = prefs.Speed
+		}
+		if prefs.Pitch > 0 {
+			prefsMap["pitch"] = prefs.Pitch
+		}
 		extrasPayload["speech_preferences"] = prefsMap
 	}
-	speechEnabled := m.tts != nil && m.tts.Enabled()
+	if streamStarted {
+		extrasPayload["speech_streaming"] = true
+	}
 	if speechEnabled {
-		extrasPayload["speech_status"] = "pending"
+		extrasPayload["speech_status"] = initialSpeechStatus
 	}
 
 	if len(extrasPayload) > 0 {
@@ -597,17 +785,128 @@ func (m *Module) handleCreateMessageStream(
 	}
 
 	if err := m.db.WithContext(ctx).First(&placeholder, "id = ?", placeholder.ID).Error; err != nil {
-		_ = streamEvent(c.Writer, flusher, "error", gin.H{"error": "failed to reload assistant message"})
+		_ = writer.Send("error", gin.H{"error": "failed to reload assistant message"})
 		return
 	}
 
 	assistantRecord = messageToRecord(placeholder, conv)
-	if err := streamEvent(c.Writer, flusher, "assistant_message", assistantRecord); err != nil {
+	if err := writer.Send("assistant_message", assistantRecord); err != nil {
 		return
 	}
 
-	if speechEnabled {
-		m.enqueueSpeechSynthesis(placeholder.ID, conv, reply, selection, speed, pitch, emotionMeta)
+	var finalSpeechStatus string
+	var finalSpeechPayload map[string]any
+	var finalSpeechError string
+
+	if streamStarted {
+		if streamFinalize && streamSession != nil {
+			if err := streamSession.Finalize(ctx); err != nil {
+				setStreamError(err)
+			}
+		}
+		streamWG.Wait()
+
+		streamErrMu.Lock()
+		err := streamErr
+		streamErrMu.Unlock()
+
+		if err != nil {
+			finalSpeechStatus = "error"
+			finalSpeechError = err.Error()
+			needAsyncSpeech = speechEnabled
+		} else if streamBuf.Len() == 0 {
+			finalSpeechStatus = "error"
+			finalSpeechError = "tts: no audio generated"
+			needAsyncSpeech = speechEnabled
+		} else {
+			finalSpeechStatus = "ready"
+			if strings.TrimSpace(streamMeta.MimeType) == "" {
+				streamMeta.MimeType = mimeForAudioFormat(streamMeta.Format)
+			}
+			if strings.TrimSpace(streamMeta.MimeType) == "" {
+				streamMeta.MimeType = "audio/mpeg"
+			}
+			encodedFull := base64.StdEncoding.EncodeToString(streamBuf.Bytes())
+			payload := map[string]any{
+				"voice_id":     streamMeta.VoiceID,
+				"provider":     streamMeta.Provider,
+				"mime_type":    streamMeta.MimeType,
+				"audio_base64": encodedFull,
+			}
+			if streamMeta.SampleRate > 0 {
+				payload["sample_rate"] = streamMeta.SampleRate
+			}
+			if streamMeta.Speed > 0 {
+				payload["speed"] = streamMeta.Speed
+			} else if prefs.Speed > 0 {
+				payload["speed"] = prefs.Speed
+			}
+			if streamMeta.Pitch > 0 {
+				payload["pitch"] = streamMeta.Pitch
+			} else if prefs.Pitch > 0 {
+				payload["pitch"] = prefs.Pitch
+			}
+			if streamMeta.Emotion != "" {
+				payload["emotion"] = streamMeta.Emotion
+			} else if prefs.EmotionHint != "" {
+				payload["emotion"] = prefs.EmotionHint
+			}
+			finalSpeechPayload = payload
+		}
+	}
+
+	if finalSpeechStatus != "" {
+		update := map[string]any{
+			"speech_status": finalSpeechStatus,
+		}
+		if finalSpeechPayload != nil {
+			update["speech"] = finalSpeechPayload
+		}
+		if finalSpeechError != "" {
+			update["speech_error"] = finalSpeechError
+		}
+		if merged, err := mergeExtras(placeholder.Extras, update); err != nil {
+			log.Printf("llm: merge final speech extras failed: %v", err)
+		} else {
+			if err := m.db.WithContext(ctx).
+				Model(&message{}).
+				Where("id = ?", placeholder.ID).
+				Update("extras", merged).
+				Error; err != nil {
+				log.Printf("llm: update final speech extras failed: %v", err)
+			} else {
+				placeholder.Extras = merged
+			}
+		}
+
+		if finalSpeechStatus == "ready" {
+			payload := gin.H{
+				"id":              placeholder.ID,
+				"conversation_id": conv.ID,
+				"voice_id":        finalSpeechPayload["voice_id"],
+				"provider":        finalSpeechPayload["provider"],
+				"mime_type":       finalSpeechPayload["mime_type"],
+				"audio_base64":    finalSpeechPayload["audio_base64"],
+			}
+			if sr, ok := finalSpeechPayload["sample_rate"]; ok {
+				payload["sample_rate"] = sr
+			}
+			if err := writer.Send("speech_stream_completed", payload); err != nil {
+				log.Printf("llm: send speech_stream_completed failed: %v", err)
+			}
+		} else if finalSpeechStatus == "error" {
+			payload := gin.H{"id": placeholder.ID}
+			if finalSpeechError != "" {
+				payload["error"] = finalSpeechError
+			}
+			if err := writer.Send("speech_stream_failed", payload); err != nil {
+				log.Printf("llm: send speech_stream_failed failed: %v", err)
+			}
+		}
+	}
+
+	if needAsyncSpeech {
+		m.enqueueSpeechSynthesis(placeholder.ID, conv, reply, selection, prefs.Speed, prefs.Pitch, emotionMeta)
 	}
 
 	if m.memory != nil {
@@ -618,5 +917,21 @@ func (m *Module) handleCreateMessageStream(
 		}
 	}
 
-	_ = streamEvent(c.Writer, flusher, "done", gin.H{"id": placeholder.ID})
+	_ = writer.Send("done", gin.H{"id": placeholder.ID})
+}
+
+func mimeForAudioFormat(format string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(format))
+	switch trimmed {
+	case "mp3", "mpeg", "audio/mpeg":
+		return "audio/mpeg"
+	case "wav", "wave", "audio/wav":
+		return "audio/wav"
+	case "pcm":
+		return "audio/wave"
+	case "opus", "audio/opus":
+		return "audio/opus"
+	default:
+		return ""
+	}
 }

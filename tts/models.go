@@ -85,6 +85,48 @@ func (r *SpeechResult) AsMap() map[string]any {
 	return payload
 }
 
+type SpeechStreamRequest struct {
+	VoiceID       string
+	Provider      string
+	Emotion       string
+	Speed         float64
+	Pitch         float64
+	Format        string
+	Instructions  string
+	InitialText   string
+	ResolvedVoice *VoiceOption `json:"-"`
+}
+
+type SpeechStreamMetadata struct {
+	VoiceID    string
+	Provider   string
+	Format     string
+	MimeType   string
+	SampleRate int
+	Speed      float64
+	Pitch      float64
+	Emotion    string
+}
+
+type SpeechStreamChunk struct {
+	Sequence int
+	Audio    []byte
+}
+
+type SpeechStreamSession interface {
+	Metadata() SpeechStreamMetadata
+	Audio() <-chan SpeechStreamChunk
+	AppendText(ctx context.Context, text string) error
+	Finalize(ctx context.Context) error
+	Err() error
+	Close() error
+}
+
+type StreamingSynthesizer interface {
+	Synthesizer
+	Stream(ctx context.Context, req SpeechStreamRequest) (SpeechStreamSession, error)
+}
+
 type Synthesizer interface {
 	Enabled() bool
 	DefaultVoiceID() string
