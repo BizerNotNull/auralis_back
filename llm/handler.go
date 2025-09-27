@@ -383,6 +383,8 @@ type createMessageResponse struct {
 	UserMessage      messageRecord  `json:"user_message"`
 	AssistantMessage *messageRecord `json:"assistant_message,omitempty"`
 	AssistantError   string         `json:"assistant_error,omitempty"`
+	TokensUsed       *int           `json:"tokens_used,omitempty"`
+	TokenBalance     *int64         `json:"token_balance,omitempty"`
 }
 
 func (m *Module) handleCreateMessage(c *gin.Context) {
@@ -436,6 +438,25 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+
+	startingBalance := int64(-1)
+	if role == "user" {
+		balance, err := m.getUserTokenBalance(ctx, userID)
+		if err != nil {
+			switch {
+			case errors.Is(err, gorm.ErrRecordNotFound):
+				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			default:
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load token balance"})
+			}
+			return
+		}
+		if balance <= 0 {
+			c.JSON(http.StatusPaymentRequired, gin.H{"error": "insufficient token balance"})
+			return
+		}
+		startingBalance = balance
+	}
 
 	var convID uint64
 	var userMsg message
@@ -548,17 +569,42 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 		UserMessage:    userRecord,
 	}
 
+	remainingBalance := startingBalance
+	var tokensUsedTotal int64
+
 	if role == "user" && wantsEventStream(c) {
-		m.handleCreateMessageStream(c, conv, userMsg, userRecord, prefs)
+		m.handleCreateMessageStream(c, conv, userMsg, userRecord, prefs, startingBalance)
 		return
 	}
 
 	if role == "user" {
-		assistantRecord, genErr := m.generateAssistantReply(ctx, conv, userMsg, prefs)
+		assistantRecord, usage, genErr := m.generateAssistantReply(ctx, conv, userMsg, prefs)
 		if genErr != nil {
 			response.AssistantError = genErr.Error()
 		} else if assistantRecord != nil {
 			response.AssistantMessage = assistantRecord
+		}
+		if usage != nil {
+			tokensUsedTotal = totalTokensUsed(usage)
+			updatedBalance, err := m.applyUsageToUserTokens(ctx, conv.UserID, usage, startingBalance)
+			if err != nil {
+				log.Printf("llm: failed to apply token usage: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to finalize token usage"})
+				return
+			}
+			remainingBalance = updatedBalance
+		}
+	}
+
+	if startingBalance >= 0 {
+		if remainingBalance < 0 {
+			remainingBalance = 0
+		}
+		response.TokenBalance = int64Pointer(remainingBalance)
+	}
+	if tokensUsedTotal > 0 {
+		if ptr := intPointerIfPositive(int(tokensUsedTotal)); ptr != nil {
+			response.TokensUsed = ptr
 		}
 	}
 
@@ -579,14 +625,14 @@ func parsePositiveUint(value, field string) (uint64, error) {
 	return id, nil
 }
 
-func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, userMsg message, prefs speechPreferences) (*messageRecord, error) {
+func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, userMsg message, prefs speechPreferences) (*messageRecord, *ChatUsage, error) {
 	if m.client == nil {
-		return nil, errors.New("llm client not configured")
+		return nil, nil, errors.New("llm client not configured")
 	}
 
 	contextData, err := m.buildConversationContext(ctx, conv)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	applyPreferenceDefaults(&prefs, contextData)
@@ -599,7 +645,7 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 			"err_code": "llm_error",
 			"err_msg":  short,
 		})
-		return nil, err
+		return nil, nil, err
 	}
 	reply := result.Content
 	usage := result.Usage
@@ -675,11 +721,11 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 
 		return tx.Model(&conversation{}).Where("id = ?", conv.ID).Update("last_msg_at", time.Now().UTC()).Error
 	}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if err := m.db.WithContext(ctx).First(&assistant, "id = ?", assistant.ID).Error; err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if usage != nil {
@@ -700,7 +746,7 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 		}
 	}
 
-	return &record, nil
+	return &record, usage, nil
 }
 
 func buildSystemPrompt(agent *agents.Agent, cfg *agents.AgentChatConfig) string {

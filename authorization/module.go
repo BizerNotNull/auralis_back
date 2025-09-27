@@ -30,6 +30,9 @@ const (
 
 const userAvatarURLExpiry = 15 * time.Minute
 
+const defaultTokenBalance int64 = 100000
+const maxPurchaseTokensPerRequest int64 = 1_000_000
+
 var (
 	ErrUsernameTaken      = errors.New("authorization: username already exists")
 	ErrWeakPassword       = errors.New("authorization: password must be at least 6 characters")
@@ -37,6 +40,7 @@ var (
 	ErrInvalidNickname    = errors.New("authorization: nickname cannot be empty")
 	ErrInvalidEmail       = errors.New("authorization: invalid email address")
 	ErrEmailTaken         = errors.New("authorization: email already exists")
+	ErrInvalidTokenAmount = errors.New("authorization: token amount must be positive")
 )
 
 // Module wires together the JWT middleware and backing services.
@@ -333,6 +337,62 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 		c.JSON(http.StatusOK, gin.H{"user": buildUserPayload(ctx, avatarStore, updated, roles)})
 	})
 
+	secured.POST("/tokens/purchase", func(c *gin.Context) {
+		var req purchaseTokensRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
+			return
+		}
+
+		if req.Amount <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidTokenAmount.Error()})
+			return
+		}
+		if req.Amount > maxPurchaseTokensPerRequest {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("token amount exceeds limit of %d", maxPurchaseTokensPerRequest)})
+			return
+		}
+
+		claims := jwt.ExtractClaims(c)
+		userID := extractUserID(claims)
+		if userID == 0 {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			return
+		}
+
+		ctx := c.Request.Context()
+		balance, err := userStore.AddTokens(ctx, userID, req.Amount)
+		if err != nil {
+			switch {
+			case errors.Is(err, gorm.ErrRecordNotFound):
+				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			case errors.Is(err, ErrInvalidTokenAmount):
+				c.JSON(http.StatusBadRequest, gin.H{"error": ErrInvalidTokenAmount.Error()})
+			default:
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update token balance"})
+			}
+			return
+		}
+
+		user, err := userStore.FindByID(ctx, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load user"})
+			return
+		}
+		user.TokenBalance = balance
+
+		roles, err := userStore.FindRoleNames(ctx, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load roles"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"token_balance": balance,
+			"user":          buildUserPayload(ctx, avatarStore, user, roles),
+		})
+	})
+
 	return &Module{db: db, userStore: userStore, jwtMiddleware: middleware, captcha: captchaStore, avatarStorage: avatarStore}, nil
 }
 
@@ -526,6 +586,11 @@ type UpdateProfileRequest struct {
 	Bio         *string `json:"bio"`
 }
 
+// purchaseTokensRequest represents token top-up payload.
+type purchaseTokensRequest struct {
+	Amount int64 `json:"amount"`
+}
+
 // AuthenticatedUser is the minimal identity stored inside JWT claims.
 type AuthenticatedUser struct {
 	ID       uint
@@ -619,6 +684,7 @@ func (s *AuthService) Register(ctx context.Context, username, password, displayN
 		Email:        normalizedEmail,
 		AvatarURL:    storedAvatar,
 		Bio:          storedBio,
+		TokenBalance: defaultTokenBalance,
 	}
 	if err := s.users.Create(ctx, user); err != nil {
 		if errors.Is(err, gorm.ErrDuplicatedKey) {
@@ -700,6 +766,51 @@ func (s *UserStore) FindRoleNames(ctx context.Context, userID uint) ([]string, e
 		normalized = append(normalized, strings.ToLower(trimmed))
 	}
 	return normalized, nil
+}
+
+// TokenBalance returns the current token balance for a user.
+func (s *UserStore) TokenBalance(ctx context.Context, userID uint) (int64, error) {
+	if s == nil {
+		return 0, errors.New("authorization: user store not initialized")
+	}
+
+	var result struct {
+		TokenBalance int64
+	}
+
+	err := s.db.WithContext(ctx).
+		Table("users").
+		Select("token_balance").
+		Where("id = ?", userID).
+		Take(&result).
+		Error
+	if err != nil {
+		return 0, err
+	}
+
+	return result.TokenBalance, nil
+}
+
+// AddTokens increments a user token balance and returns the updated value.
+func (s *UserStore) AddTokens(ctx context.Context, userID uint, amount int64) (int64, error) {
+	if s == nil {
+		return 0, errors.New("authorization: user store not initialized")
+	}
+
+	if amount <= 0 {
+		return 0, ErrInvalidTokenAmount
+	}
+
+	updates := map[string]any{
+		"token_balance": gorm.Expr("COALESCE(token_balance, 0) + ?", amount),
+		"updated_at":    time.Now().UTC(),
+	}
+
+	if err := s.db.WithContext(ctx).Model(&User{}).Where("id = ?", userID).Updates(updates).Error; err != nil {
+		return 0, err
+	}
+
+	return s.TokenBalance(ctx, userID)
 }
 
 // UpdateProfile persists profile related fields for the given user id.
@@ -784,6 +895,7 @@ type User struct {
 	Status       string  `gorm:"size:32;default:'active'"`
 	LastLoginAt  *time.Time
 	CreatedAt    time.Time
+	TokenBalance int64 `gorm:"column:token_balance;not null;default:100000"`
 	UpdatedAt    time.Time
 }
 
@@ -895,6 +1007,7 @@ func buildUserPayload(ctx context.Context, store *filestore.AvatarStorage, user 
 		"last_login_at": user.LastLoginAt,
 		"created_at":    user.CreatedAt,
 		"updated_at":    user.UpdatedAt,
+		"token_balance": user.TokenBalance,
 		"roles":         roles,
 	}
 }

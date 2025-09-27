@@ -417,26 +417,52 @@ func (m *Module) handleCreateMessageStream(
 	userMsg message,
 	userRecord messageRecord,
 	prefs speechPreferences,
+	startingBalance int64,
 ) {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
-		assistantRecord, genErr := m.generateAssistantReply(c.Request.Context(), conv, userMsg, prefs)
+		assistantRecord, usage, genErr := m.generateAssistantReply(c.Request.Context(), conv, userMsg, prefs)
 		response := createMessageResponse{
 			ConversationID: conv.ID,
 			AgentID:        conv.AgentID,
 			UserID:         conv.UserID,
 			UserMessage:    userRecord,
 		}
+		remainingBalance := startingBalance
+		var tokensUsedTotal int64
 		if genErr != nil {
 			response.AssistantError = genErr.Error()
 		} else if assistantRecord != nil {
 			response.AssistantMessage = assistantRecord
+		}
+		if usage != nil {
+			tokensUsedTotal = totalTokensUsed(usage)
+			updatedBalance, err := m.applyUsageToUserTokens(c.Request.Context(), conv.UserID, usage, startingBalance)
+			if err != nil {
+				log.Printf("llm: failed to apply token usage: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to finalize token usage"})
+				return
+			}
+			remainingBalance = updatedBalance
+			if tokensUsedTotal > 0 {
+				if ptr := intPointerIfPositive(int(tokensUsedTotal)); ptr != nil {
+					response.TokensUsed = ptr
+				}
+			}
+		}
+		if startingBalance >= 0 {
+			if remainingBalance < 0 {
+				remainingBalance = 0
+			}
+			response.TokenBalance = int64Pointer(remainingBalance)
 		}
 		c.JSON(http.StatusCreated, response)
 		return
 	}
 
 	ctx := c.Request.Context()
+
+	remainingBalance := startingBalance
 
 	contextData, err := m.buildConversationContext(ctx, conv)
 	if err != nil {
@@ -712,6 +738,7 @@ func (m *Module) handleCreateMessageStream(
 	}
 
 	if usage != nil {
+		tokensUsedTotal := totalTokensUsed(usage)
 		updates := make(map[string]any, 2)
 		if usage.PromptTokens > 0 {
 			placeholder.TokenInput = intPointerIfPositive(usage.PromptTokens)
@@ -727,6 +754,32 @@ func (m *Module) handleCreateMessageStream(
 			} else {
 				m.incrementConversationTokens(ctx, conv.ID, usage)
 			}
+		}
+		updatedBalance, err := m.applyUsageToUserTokens(ctx, conv.UserID, usage, startingBalance)
+		if err != nil {
+			log.Printf("llm: failed to apply token usage: %v", err)
+			_ = writer.Send("error", gin.H{"error": "failed to finalize token usage"})
+			return
+		}
+		remainingBalance = updatedBalance
+		balancePayload := remainingBalance
+		if balancePayload < 0 {
+			balancePayload = 0
+		}
+		payload := gin.H{"token_balance": balancePayload}
+		if tokensUsedTotal > 0 {
+			payload["tokens_used"] = tokensUsedTotal
+		}
+		if err := writer.Send("token_update", payload); err != nil {
+			return
+		}
+	} else if startingBalance >= 0 {
+		balancePayload := startingBalance
+		if balancePayload < 0 {
+			balancePayload = 0
+		}
+		if err := writer.Send("token_update", gin.H{"token_balance": balancePayload}); err != nil {
+			return
 		}
 	}
 
