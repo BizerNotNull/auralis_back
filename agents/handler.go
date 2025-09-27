@@ -203,6 +203,21 @@ type updateAgentRequest struct {
 	RemoveAvatar     *bool     `json:"remove_avatar"`
 }
 
+// handleCreateAgent godoc
+// @Summary 创建智能体
+// @Description 创建新的智能体配置并可选上传头像
+// @Tags Agents
+// @Accept json
+// @Accept multipart/form-data
+// @Produce json
+// @Param request body createAgentRequest true "智能体信息"
+// @Param avatar formData file false "头像文件"
+// @Success 201 {object} map[string]interface{} "创建成功的智能体"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 401 {object} map[string]string "未授权"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /agents [post]
 func (m *Module) handleCreateAgent(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -361,6 +376,24 @@ func (m *Module) handleCreateAgent(c *gin.Context) {
 	c.JSON(http.StatusCreated, response)
 }
 
+// handleUpdateAgent godoc
+// @Summary 更新智能体
+// @Description 更新指定智能体的基础信息与模型配置
+// @Tags Agents
+// @Accept json
+// @Accept multipart/form-data
+// @Produce json
+// @Param id path int true "智能体ID"
+// @Param request body updateAgentRequest true "更新内容"
+// @Param avatar formData file false "头像文件"
+// @Success 200 {object} map[string]interface{} "更新后的智能体"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 401 {object} map[string]string "未授权"
+// @Failure 403 {object} map[string]string "权限不足"
+// @Failure 404 {object} map[string]string "未找到"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /agents/{id} [put]
 func (m *Module) handleUpdateAgent(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -687,6 +720,20 @@ func (m *Module) handleUpdateAgent(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
+// handleListAgents godoc
+// @Summary 列出公开智能体
+// @Description 按排序和状态筛选可用的智能体列表
+// @Tags Agents
+// @Produce json
+// @Param sort query string false "排序字段，可选 hot|views|rating|updated|created"
+// @Param direction query string false "排序方向，默认 desc"
+// @Param limit query int false "返回数量上限"
+// @Param status query string false "状态筛选，默认 active"
+// @Success 200 {object} map[string]interface{} "智能体列表"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /agents [get]
 func (m *Module) handleListAgents(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -912,6 +959,16 @@ func computeAgentHotScore(agent Agent) float64 {
 	return viewComponent + ratingComponent + recencyComponent
 }
 
+// handleListMyAgents godoc
+// @Summary 列出我的智能体
+// @Description 返回当前登录用户创建的所有智能体
+// @Tags Agents
+// @Produce json
+// @Success 200 {object} map[string]interface{} "智能体列表"
+// @Failure 401 {object} map[string]string "未授权"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /agents/mine [get]
 func (m *Module) handleListMyAgents(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -963,6 +1020,21 @@ func (m *Module) handleListMyAgents(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"agents": agents})
 }
 
+// handleAdminListAgents godoc
+// @Summary 管理员查询智能体
+// @Description 管理员按状态、创建者和排序获取智能体列表
+// @Tags Agents
+// @Produce json
+// @Param status query string false "状态筛选，支持 all"
+// @Param created_by query int false "按创建者过滤"
+// @Param sort query string false "排序字段"
+// @Param direction query string false "排序方向"
+// @Param limit query int false "返回数量上限"
+// @Success 200 {object} map[string]interface{} "智能体列表"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /admin/agents [get]
 func (m *Module) handleAdminListAgents(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -1044,6 +1116,18 @@ func (m *Module) handleAdminListAgents(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"agents": agents})
 }
 
+// handleGetAgent godoc
+// @Summary 获取智能体详情
+// @Description 获取单个智能体的完整信息和对话配置
+// @Tags Agents
+// @Produce json
+// @Param id path int true "智能体ID"
+// @Success 200 {object} map[string]interface{} "智能体详情"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 404 {object} map[string]string "未找到"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /agents/{id} [get]
 func (m *Module) handleGetAgent(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -1116,6 +1200,20 @@ type upsertRatingRequest struct {
 	Comment *string `json:"comment"`
 }
 
+// handleGetRatings godoc
+// @Summary 查询智能体评分
+// @Description 获取评分汇总并分页返回详细评价
+// @Tags Agents
+// @Produce json
+// @Param id path int true "智能体ID"
+// @Param user_id query int false "指定用户的评分"
+// @Param page query int false "页码，从1开始"
+// @Param page_size query int false "每页条数，默认10"
+// @Success 200 {object} map[string]interface{} "评分数据"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /agents/{id}/ratings [get]
 func (m *Module) handleGetRatings(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -1229,6 +1327,19 @@ func (m *Module) handleGetRatings(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
+// handleUpsertRating godoc
+// @Summary 提交或更新评分
+// @Description 为指定智能体创建或更新用户评分
+// @Tags Agents
+// @Accept json
+// @Produce json
+// @Param id path int true "智能体ID"
+// @Param request body upsertRatingRequest true "评分内容"
+// @Success 200 {object} map[string]interface{} "最新评分信息"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /agents/{id}/ratings [put]
 func (m *Module) handleUpsertRating(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -1362,6 +1473,19 @@ type conversationClearRequest struct {
 	UserID uint64 `json:"user_id" binding:"required"`
 }
 
+// handleClearConversation godoc
+// @Summary 清除会话记录
+// @Description 删除用户与智能体的历史会话及消息
+// @Tags Agents
+// @Accept json
+// @Produce json
+// @Param id path int true "智能体ID"
+// @Param request body conversationClearRequest true "清理请求"
+// @Success 200 {object} map[string]interface{} "是否清理成功"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /agents/{id}/conversations [delete]
 func (m *Module) handleClearConversation(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -1408,6 +1532,21 @@ func (m *Module) handleClearConversation(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"cleared": true})
 }
 
+// handleCreateConversation godoc
+// @Summary 初始化会话
+// @Description 为用户与智能体建立新的对话会话
+// @Tags Agents
+// @Accept json
+// @Produce json
+// @Param id path int true "智能体ID"
+// @Param request body conversationInitRequest true "会话初始化参数"
+// @Success 200 {object} map[string]interface{} "会话信息"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 404 {object} map[string]string "未找到"
+// @Failure 409 {object} map[string]string "状态冲突"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /agents/{id}/conversations [post]
 func (m *Module) handleCreateConversation(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})

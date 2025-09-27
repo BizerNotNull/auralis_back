@@ -2,6 +2,7 @@ package llm
 
 import (
 	"auralis_back/agents"
+	cache "auralis_back/cache"
 	"auralis_back/tts"
 	"context"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -31,6 +33,7 @@ type Module struct {
 	tts          tts.Synthesizer
 	memory       *conversationMemory
 	modelCatalog []ChatModelOption
+	messageCache *messageCache
 }
 
 // RegisterRoutes mounts the LLM testing endpoint under /llm.
@@ -49,12 +52,20 @@ func RegisterRoutes(router *gin.Engine, synthesizer tts.Synthesizer) (*Module, e
 		return nil, err
 	}
 
+	var msgCache *messageCache
+	if cacheClient, err := cache.GetRedisClient(); err != nil {
+		log.Printf("llm: redis disabled for recent message cache: %v", err)
+	} else {
+		msgCache = newMessageCache(cacheClient)
+	}
+
 	module := &Module{
 		client:       client,
 		db:           db,
 		tts:          synthesizer,
 		memory:       newConversationMemory(db, client),
 		modelCatalog: loadChatModelCatalog(),
+		messageCache: msgCache,
 	}
 
 	group := router.Group("/llm")
@@ -68,7 +79,15 @@ func RegisterRoutes(router *gin.Engine, synthesizer tts.Synthesizer) (*Module, e
 	return module, nil
 }
 
-// handleListModels exposes the configured chat model catalog to clients.
+// handleListModels godoc
+// @Summary 查询聊天模型
+// @Description 返回当前可用的聊天模型选项列表
+// @Tags LLM
+// @Produce json
+// @Param provider query string false "按提供方过滤"
+// @Success 200 {object} map[string]interface{} "模型列表"
+// @Author bizer
+// @Router /llm/models [get]
 func (m *Module) handleListModels(c *gin.Context) {
 	catalog := m.modelCatalog
 	if len(catalog) == 0 {
@@ -98,6 +117,18 @@ type completeResponse struct {
 	Usage   *ChatUsage `json:"usage,omitempty"`
 }
 
+// handleComplete godoc
+// @Summary 文本补全
+// @Description 使用默认模型对提示语进行补全生成
+// @Tags LLM
+// @Accept json
+// @Produce json
+// @Param request body completeRequest true "补全请求"
+// @Success 200 {object} completeResponse "补全结果"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 502 {object} map[string]string "上游服务错误"
+// @Author bizer
+// @Router /llm/complete [post]
 func (m *Module) handleComplete(c *gin.Context) {
 	var req completeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -137,6 +168,18 @@ type messageRecord struct {
 	CreatedAt       time.Time       `json:"created_at"`
 }
 
+// handleRecentMessages godoc
+// @Summary 查询最近消息
+// @Description 获取指定用户与智能体的最近对话消息
+// @Tags LLM
+// @Produce json
+// @Param agent_id query int true "智能体ID"
+// @Param user_id query int true "用户ID"
+// @Success 200 {object} map[string]interface{} "消息列表"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /llm/messages [get]
 func (m *Module) handleRecentMessages(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -162,8 +205,22 @@ func (m *Module) handleRecentMessages(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
+	if m.messageCache != nil {
+		if cached, cacheErr := m.messageCache.get(ctx, agentID, userID); cacheErr == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"agent_id": agentID,
+				"user_id":  userID,
+				"messages": cached,
+			})
+			return
+		} else if cacheErr != nil && !errors.Is(cacheErr, redis.Nil) {
+			log.Printf("llm: recent messages cache fetch failed: %v", cacheErr)
+		}
+	}
+
 	var records []messageRecord
-	tx := m.db.WithContext(c.Request.Context()).
+	tx := m.db.WithContext(ctx).
 		Table("messages").
 		Select("messages.id, messages.conversation_id, conversations.agent_id, conversations.user_id, messages.seq, messages.role, messages.format, messages.content, messages.parent_msg_id, messages.latency_ms, messages.token_input, messages.token_output, messages.err_code, messages.err_msg, messages.extras, messages.created_at").
 		Joins("JOIN conversations ON conversations.id = messages.conversation_id").
@@ -180,11 +237,25 @@ func (m *Module) handleRecentMessages(c *gin.Context) {
 		records[i], records[j] = records[j], records[i]
 	}
 
+	if m.messageCache != nil {
+		m.messageCache.store(ctx, agentID, userID, records)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"agent_id": agentID,
 		"user_id":  userID,
 		"messages": records,
 	})
+}
+
+func (m *Module) invalidateRecentMessagesCache(ctx context.Context, agentID, userID uint64) {
+	if m == nil || m.messageCache == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.messageCache.invalidate(ctx, agentID, userID)
 }
 
 type messageSpeechRecord struct {
@@ -259,6 +330,20 @@ func (m *Module) ensureSpeechAudioURL(speech map[string]any) map[string]any {
 	return clone
 }
 
+// handleMessageSpeech godoc
+// @Summary 查询语音生成结果
+// @Description 获取指定消息的语音生成状态与元数据
+// @Tags LLM
+// @Produce json
+// @Param id path int true "消息ID"
+// @Param agent_id query int true "智能体ID"
+// @Param user_id query int true "用户ID"
+// @Success 200 {object} map[string]interface{} "语音信息"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 404 {object} map[string]string "未找到"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /llm/messages/{id}/speech [get]
 func (m *Module) handleMessageSpeech(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -339,6 +424,15 @@ func (m *Module) handleMessageSpeech(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
+// handleMessageSpeechAudio godoc
+// @Summary 下载语音音频
+// @Description 当前环境未开放语音音频下载功能
+// @Tags LLM
+// @Produce application/json
+// @Param id path int true "消息ID"
+// @Failure 404 {object} map[string]string "功能未启用"
+// @Author bizer
+// @Router /llm/messages/{id}/speech/audio [get]
 func (m *Module) handleMessageSpeechAudio(c *gin.Context) {
 	c.JSON(http.StatusNotFound, gin.H{"error": "speech streaming disabled"})
 }
@@ -387,6 +481,20 @@ type createMessageResponse struct {
 	TokenBalance     *int64         `json:"token_balance,omitempty"`
 }
 
+// handleCreateMessage godoc
+// @Summary 发送对话消息
+// @Description 创建用户或助手消息并按需触发回复生成
+// @Tags LLM
+// @Accept json
+// @Produce json
+// @Param request body createMessageRequest true "消息内容"
+// @Success 200 {object} createMessageResponse "消息创建结果"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 402 {object} map[string]string "余额不足"
+// @Failure 404 {object} map[string]string "未找到"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /llm/messages [post]
 func (m *Module) handleCreateMessage(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -561,6 +669,8 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load conversation", "details": err.Error()})
 		return
 	}
+
+	m.invalidateRecentMessagesCache(ctx, conv.AgentID, conv.UserID)
 
 	response := createMessageResponse{
 		ConversationID: conv.ID,

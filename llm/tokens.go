@@ -1,6 +1,7 @@
 package llm
 
 import (
+	authorization "auralis_back/authorization"
 	"context"
 	"errors"
 	"log"
@@ -83,6 +84,7 @@ func (m *Module) applyUsageToUserTokens(ctx context.Context, userID uint64, usag
 	if res.RowsAffected == 0 {
 		return 0, gorm.ErrRecordNotFound
 	}
+	authorization.InvalidateUserCache(ctx, uint(userID))
 	return m.getUserTokenBalance(ctx, userID)
 }
 
