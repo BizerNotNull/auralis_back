@@ -105,6 +105,15 @@ func (c *qdrantClient) EnsureCollection(ctx context.Context, name string, vector
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusConflict {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		trimmed := strings.TrimSpace(string(snippet))
+		lower := strings.ToLower(trimmed)
+		if trimmed == "" || strings.Contains(lower, "already exists") {
+			return nil
+		}
+		return fmt.Errorf("knowledge: ensure collection status %s: %s", resp.Status, trimmed)
+	}
 	if resp.StatusCode >= 400 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("knowledge: ensure collection status %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
@@ -163,8 +172,8 @@ func (c *qdrantClient) DeletePoints(ctx context.Context, collection string, poin
 		return fmt.Errorf("knowledge: encode delete payload: %w", err)
 	}
 
-	endpoint := fmt.Sprintf("%s/collections/%s/points", c.baseURL, url.PathEscape(collection))
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, body)
+	endpoint := fmt.Sprintf("%s/collections/%s/points/delete", c.baseURL, url.PathEscape(collection))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
 	if err != nil {
 		return fmt.Errorf("knowledge: create delete request: %w", err)
 	}
