@@ -188,10 +188,6 @@ func (m *Module) handleAdminRequest(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "admin request service unavailable"})
 		return
 	}
-	if m.adminRequestMailer == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "admin request mailer is not configured"})
-		return
-	}
 
 	var payload adminRequestPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
@@ -219,11 +215,43 @@ func (m *Module) handleAdminRequest(c *gin.Context) {
 		return
 	}
 
-	if err := m.adminRequestMailer.Send(user, &payload); err != nil {
-		log.Printf("authorization: failed to send admin request email: %v", err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to notify administrator"})
+	assigned, err := m.userStore.GrantRoleByCode(ctx, userID, "admin")
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "admin role not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to grant admin role"})
+		}
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "admin request submitted"})
+	roles, err := m.userStore.FindRoleNames(ctx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load roles"})
+		return
+	}
+
+	message := "admin role already assigned"
+	if assigned {
+		message = "admin role granted"
+	}
+
+	response := gin.H{
+		"message":  message,
+		"assigned": assigned,
+		"roles":    roles,
+	}
+
+	if user != nil {
+		response["user"] = buildUserPayload(ctx, m.avatarStorage, user, roles)
+	}
+
+	if m.adminRequestMailer != nil {
+		if err := m.adminRequestMailer.Send(user, &payload); err != nil {
+			log.Printf("authorization: failed to send admin request email: %v", err)
+			response["warning"] = "failed to notify administrator"
+		}
+	}
+
+	c.JSON(http.StatusOK, response)
 }

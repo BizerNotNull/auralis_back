@@ -25,14 +25,24 @@ type httpEmbedder struct {
 	modelID     string
 	maxBatch    int
 	expectDim   int
+	dimensions  int
+	inputType   string
+	textType    string
+	instruct    string
+	outputType  string
 	extraHeader http.Header
 }
 
 type embeddingRequest struct {
-	Model string      `json:"model"`
-	Input []string    `json:"input"`
-	User  string      `json:"user,omitempty"`
-	Meta  interface{} `json:"metadata,omitempty"`
+	Model      string      `json:"model"`
+	Input      []string    `json:"input"`
+	User       string      `json:"user,omitempty"`
+	Meta       interface{} `json:"metadata,omitempty"`
+	Dimensions *int        `json:"dimensions,omitempty"`
+	InputType  string      `json:"input_type,omitempty"`
+	TextType   string      `json:"text_type,omitempty"`
+	Instruct   string      `json:"instruct,omitempty"`
+	OutputType string      `json:"output_type,omitempty"`
 }
 
 type embeddingResponse struct {
@@ -45,6 +55,9 @@ type embeddingResponse struct {
 func NewHTTPEmbedderFromEnv() (Embedder, error) {
 	apiKey := strings.TrimSpace(os.Getenv("EMBEDDING_API_KEY"))
 	if apiKey == "" {
+		apiKey = strings.TrimSpace(os.Getenv("DASHSCOPE_API_KEY"))
+	}
+	if apiKey == "" {
 		apiKey = strings.TrimSpace(os.Getenv("LLM_API_KEY"))
 	}
 	if apiKey == "" {
@@ -53,10 +66,13 @@ func NewHTTPEmbedderFromEnv() (Embedder, error) {
 
 	baseURL := strings.TrimSpace(os.Getenv("EMBEDDING_BASE_URL"))
 	if baseURL == "" {
+		baseURL = strings.TrimSpace(os.Getenv("DASHSCOPE_BASE_URL"))
+	}
+	if baseURL == "" {
 		baseURL = strings.TrimSpace(os.Getenv("LLM_BASE_URL"))
 	}
 	if baseURL == "" {
-		baseURL = "https://openai.qiniu.com/v1"
+		baseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
@@ -65,7 +81,10 @@ func NewHTTPEmbedderFromEnv() (Embedder, error) {
 
 	modelID := strings.TrimSpace(os.Getenv("EMBEDDING_MODEL_ID"))
 	if modelID == "" {
-		modelID = "text-embedding-3-small"
+		modelID = strings.TrimSpace(os.Getenv("DASHSCOPE_EMBEDDING_MODEL"))
+	}
+	if modelID == "" {
+		modelID = "text-embedding-v4"
 	}
 
 	maxBatch := 16
@@ -89,6 +108,33 @@ func NewHTTPEmbedderFromEnv() (Embedder, error) {
 		}
 	}
 
+	dimensions := 0
+	if raw := strings.TrimSpace(os.Getenv("EMBEDDING_DIMENSIONS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			dimensions = parsed
+		}
+	}
+	if dimensions == 0 && expectDim > 0 {
+		dimensions = expectDim
+	}
+
+	inputType := strings.TrimSpace(os.Getenv("EMBEDDING_INPUT_TYPE"))
+	if inputType != "" {
+		inputType = strings.ToLower(inputType)
+	}
+
+	textType := strings.TrimSpace(os.Getenv("EMBEDDING_TEXT_TYPE"))
+	if textType != "" {
+		textType = strings.ToLower(textType)
+	}
+
+	outputType := strings.TrimSpace(os.Getenv("EMBEDDING_OUTPUT_TYPE"))
+	if outputType != "" {
+		outputType = strings.ToLower(outputType)
+	}
+
+	instruct := strings.TrimSpace(os.Getenv("EMBEDDING_INSTRUCT"))
+
 	client := &http.Client{Timeout: 30 * time.Second}
 
 	return &httpEmbedder{
@@ -98,6 +144,11 @@ func NewHTTPEmbedderFromEnv() (Embedder, error) {
 		modelID:    modelID,
 		maxBatch:   maxBatch,
 		expectDim:  expectDim,
+		dimensions: dimensions,
+		inputType:  inputType,
+		textType:   textType,
+		instruct:   instruct,
+		outputType: outputType,
 		extraHeader: http.Header{
 			"User-Agent": []string{"auralis-knowledge/1.0"},
 		},
@@ -144,6 +195,22 @@ func (e *httpEmbedder) embedBatch(ctx context.Context, batch []string) ([][]floa
 	payload := embeddingRequest{
 		Model: e.modelID,
 		Input: batch,
+	}
+	if e.dimensions > 0 {
+		dim := e.dimensions
+		payload.Dimensions = &dim
+	}
+	if e.inputType != "" {
+		payload.InputType = e.inputType
+	}
+	if e.textType != "" {
+		payload.TextType = e.textType
+	}
+	if e.instruct != "" {
+		payload.Instruct = e.instruct
+	}
+	if e.outputType != "" {
+		payload.OutputType = e.outputType
 	}
 
 	body := &bytes.Buffer{}

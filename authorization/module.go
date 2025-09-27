@@ -25,6 +25,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -1203,6 +1204,58 @@ func (s *UserStore) FindRoleNames(ctx context.Context, userID uint) ([]string, e
 		s.cache.storeRoles(ctx, userID, normalized)
 	}
 	return normalized, nil
+}
+
+// GrantRoleByCode ensures that the given role is associated with the user.
+// It returns true when a new assignment is created and false if it already existed.
+func (s *UserStore) GrantRoleByCode(ctx context.Context, userID uint, roleCode string) (bool, error) {
+	if s == nil {
+		return false, errors.New("authorization: user store not initialized")
+	}
+	if userID == 0 {
+		return false, errors.New("authorization: invalid user id")
+	}
+
+	trimmed := strings.TrimSpace(roleCode)
+	if trimmed == "" {
+		return false, errors.New("authorization: role code is required")
+	}
+	normalized := strings.ToLower(trimmed)
+
+	var assigned bool
+
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var role Role
+		if err := tx.Where("LOWER(code) = ?", normalized).First(&role).Error; err != nil {
+			return err
+		}
+
+		assignment := UserRole{
+			UserID: userID,
+			RoleID: role.ID,
+		}
+
+		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&assignment)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
+			assigned = true
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, fmt.Errorf("authorization: role with code %q not found: %w", normalized, err)
+		}
+		return false, err
+	}
+
+	if s.cache != nil {
+		s.cache.invalidateRoles(ctx, userID)
+	}
+
+	return assigned, nil
 }
 
 // TokenBalance returns the current token balance for a user.
