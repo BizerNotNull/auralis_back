@@ -301,3 +301,34 @@ CREATE TABLE `users`  (
 ) ENGINE = InnoDB AUTO_INCREMENT = 3 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '应用账号表' ROW_FORMAT = DYNAMIC;
 
 SET FOREIGN_KEY_CHECKS = 1;
+
+INSERT INTO `roles` (`id`, `name`, `code`, `created_at`, `updated_at`) VALUES (1, 'admin', 'admin', NULL, NULL);
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS `grant_admin_role`$$
+CREATE PROCEDURE `grant_admin_role`(IN p_user_id BIGINT UNSIGNED)
+BEGIN
+    DECLARE v_role_id BIGINT UNSIGNED DEFAULT NULL;
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_role_id = NULL;
+
+    -- Ensure the target user exists before attempting to grant the role.
+    IF NOT EXISTS (SELECT 1 FROM users WHERE id = p_user_id) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found';
+    END IF;
+
+    -- Locate the admin role record by its code.
+    SELECT id INTO v_role_id FROM roles WHERE code = 'admin' LIMIT 1;
+
+    IF v_role_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Admin role not found';
+    END IF;
+
+    -- Grant the admin role if it has not already been assigned.
+    INSERT IGNORE INTO user_roles (user_id, role_id, created_at)
+    VALUES (p_user_id, v_role_id, NOW(3));
+END$$
+
+DELIMITER ;
+
+
+

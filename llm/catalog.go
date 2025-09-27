@@ -20,7 +20,7 @@ type ChatModelOption struct {
 
 var defaultChatModelCatalog = []ChatModelOption{
 	{
-		Provider:     "openai",
+		Provider:     "qiniu",
 		Name:         "gpt-oss-120b",
 		DisplayName:  "GPT-OSS 120B",
 		Description:  "默认通用模型，兼容 OpenAI Chat Completions 协议。",
@@ -28,35 +28,35 @@ var defaultChatModelCatalog = []ChatModelOption{
 		Recommended:  true,
 	},
 	{
-		Provider:     "openai",
+		Provider:     "qiniu",
 		Name:         "deepseek/deepseek-v3.1-terminus",
 		DisplayName:  "DeepSeek Terminus v3.1",
 		Description:  "注重复杂推理的旗舰模型，适合深入分析任务。",
 		Capabilities: []string{"chat", "reasoning"},
 	},
 	{
-		Provider:     "openai",
+		Provider:     "qiniu",
 		Name:         "x-ai/grok-4-fast",
 		DisplayName:  "Grok-4 Fast",
 		Description:  "实时搜索增强，响应速度快，适合需要快速反馈的场景。",
 		Capabilities: []string{"chat", "search"},
 	},
 	{
-		Provider:     "openai",
+		Provider:     "qiniu",
 		Name:         "qwen3-max",
 		DisplayName:  "Qwen 3 Max",
 		Description:  "多语言表现优秀的大模型，擅长长文本理解与创作。",
 		Capabilities: []string{"chat", "multilingual"},
 	},
 	{
-		Provider:     "openai",
+		Provider:     "qiniu",
 		Name:         "MiniMax-M1",
 		DisplayName:  "MiniMax M1",
 		Description:  "均衡型模型，适合通用助理和内容创作。",
 		Capabilities: []string{"chat"},
 	},
 	{
-		Provider:     "openai",
+		Provider:     "qiniu",
 		Name:         "doubao-seed-1.6",
 		DisplayName:  "Doubao Seed 1.6",
 		Description:  "语义理解稳定，可作入门业务接入模型。",
