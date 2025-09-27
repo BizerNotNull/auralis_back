@@ -80,6 +80,15 @@ func RegisterRoutes(router *gin.Engine, guard *authorization.Guard) (*Module, er
 	return module, nil
 }
 
+// handleListModels godoc
+// @Summary 列出模型
+// @Description 返回所有已注册的 Live2D 模型信息
+// @Tags Live2D
+// @Produce json
+// @Success 200 {object} map[string]interface{} "模型列表"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /live2d/models [get]
 func (m *Module) handleListModels(c *gin.Context) {
 	var models []Live2DModel
 	if err := m.db.Order("created_at desc").Find(&models).Error; err != nil {
@@ -96,6 +105,17 @@ func (m *Module) handleListModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"models": result})
 }
 
+// handleGetModel godoc
+// @Summary 获取模型详情
+// @Description 根据 ID 获取单个 Live2D 模型的详细信息
+// @Tags Live2D
+// @Produce json
+// @Param id path int true "模型ID"
+// @Success 200 {object} map[string]interface{} "模型详情"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 404 {object} map[string]string "未找到"
+// @Author bizer
+// @Router /live2d/models/{id} [get]
 func (m *Module) handleGetModel(c *gin.Context) {
 	model, err := m.fetchModelByParam(c.Param("id"))
 	if err != nil {
@@ -110,6 +130,22 @@ func (m *Module) handleGetModel(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"model": m.toDTO(model)})
 }
 
+// handleCreateModel godoc
+// @Summary 创建模型
+// @Description 上传 Live2D 资源或登记外部模型链接
+// @Tags Live2D
+// @Accept multipart/form-data
+// @Produce json
+// @Param name formData string true "模型名称"
+// @Param description formData string false "模型描述"
+// @Param archive formData file false "模型压缩包"
+// @Param external_model_url formData string false "外部模型地址"
+// @Param external_preview_url formData string false "外部预览地址"
+// @Success 201 {object} map[string]interface{} "新建的模型"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /live2d/models [post]
 func (m *Module) handleCreateModel(c *gin.Context) {
 	var form createModelForm
 	if err := c.ShouldBind(&form); err != nil {
@@ -212,6 +248,19 @@ func (m *Module) handleCreateModel(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"model": m.toDTO(&model)})
 }
 
+// handleDeleteModel godoc
+// @Summary 删除模型
+// @Description 删除指定的 Live2D 模型及其本地资源
+// @Tags Live2D
+// @Produce json
+// @Param id path int true "模型ID"
+// @Success 200 {object} map[string]interface{} "删除结果"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 404 {object} map[string]string "未找到"
+// @Failure 409 {object} map[string]string "资源冲突"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /live2d/models/{id} [delete]
 func (m *Module) handleDeleteModel(c *gin.Context) {
 	model, err := m.fetchModelByParam(c.Param("id"))
 	if err != nil {
@@ -253,6 +302,17 @@ func (m *Module) handleDeleteModel(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
 }
 
+// handleServeFile godoc
+// @Summary 下载模型资源
+// @Description 获取指定模型的静态资源文件
+// @Tags Live2D
+// @Produce application/octet-stream
+// @Param id path int true "模型ID"
+// @Param filepath path string true "资源路径"
+// @Success 200 {file} binary "模型资源文件"
+// @Failure 404 {object} map[string]string "未找到"
+// @Author bizer
+// @Router /live2d/models/{id}/files/{filepath} [get]
 func (m *Module) handleServeFile(c *gin.Context) {
 	model, err := m.fetchModelByParam(c.Param("id"))
 	if err != nil {

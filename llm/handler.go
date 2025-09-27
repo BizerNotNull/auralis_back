@@ -2,6 +2,7 @@ package llm
 
 import (
 	"auralis_back/agents"
+	cache "auralis_back/cache"
 	"auralis_back/tts"
 	"context"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -29,7 +31,9 @@ type Module struct {
 	client       *ChatClient
 	db           *gorm.DB
 	tts          tts.Synthesizer
+	memory       *conversationMemory
 	modelCatalog []ChatModelOption
+	messageCache *messageCache
 }
 
 // RegisterRoutes mounts the LLM testing endpoint under /llm.
@@ -44,15 +48,24 @@ func RegisterRoutes(router *gin.Engine, synthesizer tts.Synthesizer) (*Module, e
 		return nil, err
 	}
 
-	if err := db.AutoMigrate(&conversation{}, &message{}); err != nil {
+	if err := db.AutoMigrate(&conversation{}, &message{}, &userAgentMemory{}); err != nil {
 		return nil, err
+	}
+
+	var msgCache *messageCache
+	if cacheClient, err := cache.GetRedisClient(); err != nil {
+		log.Printf("llm: redis disabled for recent message cache: %v", err)
+	} else {
+		msgCache = newMessageCache(cacheClient)
 	}
 
 	module := &Module{
 		client:       client,
 		db:           db,
 		tts:          synthesizer,
+		memory:       newConversationMemory(db, client),
 		modelCatalog: loadChatModelCatalog(),
+		messageCache: msgCache,
 	}
 
 	group := router.Group("/llm")
@@ -66,7 +79,15 @@ func RegisterRoutes(router *gin.Engine, synthesizer tts.Synthesizer) (*Module, e
 	return module, nil
 }
 
-// handleListModels exposes the configured chat model catalog to clients.
+// handleListModels godoc
+// @Summary 查询聊天模型
+// @Description 返回当前可用的聊天模型选项列表
+// @Tags LLM
+// @Produce json
+// @Param provider query string false "按提供方过滤"
+// @Success 200 {object} map[string]interface{} "模型列表"
+// @Author bizer
+// @Router /llm/models [get]
 func (m *Module) handleListModels(c *gin.Context) {
 	catalog := m.modelCatalog
 	if len(catalog) == 0 {
@@ -96,6 +117,18 @@ type completeResponse struct {
 	Usage   *ChatUsage `json:"usage,omitempty"`
 }
 
+// handleComplete godoc
+// @Summary 文本补全
+// @Description 使用默认模型对提示语进行补全生成
+// @Tags LLM
+// @Accept json
+// @Produce json
+// @Param request body completeRequest true "补全请求"
+// @Success 200 {object} completeResponse "补全结果"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 502 {object} map[string]string "上游服务错误"
+// @Author bizer
+// @Router /llm/complete [post]
 func (m *Module) handleComplete(c *gin.Context) {
 	var req completeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -135,6 +168,18 @@ type messageRecord struct {
 	CreatedAt       time.Time       `json:"created_at"`
 }
 
+// handleRecentMessages godoc
+// @Summary 查询最近消息
+// @Description 获取指定用户与智能体的最近对话消息
+// @Tags LLM
+// @Produce json
+// @Param agent_id query int true "智能体ID"
+// @Param user_id query int true "用户ID"
+// @Success 200 {object} map[string]interface{} "消息列表"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /llm/messages [get]
 func (m *Module) handleRecentMessages(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -160,8 +205,22 @@ func (m *Module) handleRecentMessages(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
+	if m.messageCache != nil {
+		if cached, cacheErr := m.messageCache.get(ctx, agentID, userID); cacheErr == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"agent_id": agentID,
+				"user_id":  userID,
+				"messages": cached,
+			})
+			return
+		} else if cacheErr != nil && !errors.Is(cacheErr, redis.Nil) {
+			log.Printf("llm: recent messages cache fetch failed: %v", cacheErr)
+		}
+	}
+
 	var records []messageRecord
-	tx := m.db.WithContext(c.Request.Context()).
+	tx := m.db.WithContext(ctx).
 		Table("messages").
 		Select("messages.id, messages.conversation_id, conversations.agent_id, conversations.user_id, messages.seq, messages.role, messages.format, messages.content, messages.parent_msg_id, messages.latency_ms, messages.token_input, messages.token_output, messages.err_code, messages.err_msg, messages.extras, messages.created_at").
 		Joins("JOIN conversations ON conversations.id = messages.conversation_id").
@@ -178,11 +237,25 @@ func (m *Module) handleRecentMessages(c *gin.Context) {
 		records[i], records[j] = records[j], records[i]
 	}
 
+	if m.messageCache != nil {
+		m.messageCache.store(ctx, agentID, userID, records)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"agent_id": agentID,
 		"user_id":  userID,
 		"messages": records,
 	})
+}
+
+func (m *Module) invalidateRecentMessagesCache(ctx context.Context, agentID, userID uint64) {
+	if m == nil || m.messageCache == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.messageCache.invalidate(ctx, agentID, userID)
 }
 
 type messageSpeechRecord struct {
@@ -257,6 +330,20 @@ func (m *Module) ensureSpeechAudioURL(speech map[string]any) map[string]any {
 	return clone
 }
 
+// handleMessageSpeech godoc
+// @Summary 查询语音生成结果
+// @Description 获取指定消息的语音生成状态与元数据
+// @Tags LLM
+// @Produce json
+// @Param id path int true "消息ID"
+// @Param agent_id query int true "智能体ID"
+// @Param user_id query int true "用户ID"
+// @Success 200 {object} map[string]interface{} "语音信息"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 404 {object} map[string]string "未找到"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /llm/messages/{id}/speech [get]
 func (m *Module) handleMessageSpeech(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -337,6 +424,15 @@ func (m *Module) handleMessageSpeech(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
+// handleMessageSpeechAudio godoc
+// @Summary 下载语音音频
+// @Description 当前环境未开放语音音频下载功能
+// @Tags LLM
+// @Produce application/json
+// @Param id path int true "消息ID"
+// @Failure 404 {object} map[string]string "功能未启用"
+// @Author bizer
+// @Router /llm/messages/{id}/speech/audio [get]
 func (m *Module) handleMessageSpeechAudio(c *gin.Context) {
 	c.JSON(http.StatusNotFound, gin.H{"error": "speech streaming disabled"})
 }
@@ -381,8 +477,24 @@ type createMessageResponse struct {
 	UserMessage      messageRecord  `json:"user_message"`
 	AssistantMessage *messageRecord `json:"assistant_message,omitempty"`
 	AssistantError   string         `json:"assistant_error,omitempty"`
+	TokensUsed       *int           `json:"tokens_used,omitempty"`
+	TokenBalance     *int64         `json:"token_balance,omitempty"`
 }
 
+// handleCreateMessage godoc
+// @Summary 发送对话消息
+// @Description 创建用户或助手消息并按需触发回复生成
+// @Tags LLM
+// @Accept json
+// @Produce json
+// @Param request body createMessageRequest true "消息内容"
+// @Success 200 {object} createMessageResponse "消息创建结果"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 402 {object} map[string]string "余额不足"
+// @Failure 404 {object} map[string]string "未找到"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /llm/messages [post]
 func (m *Module) handleCreateMessage(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -434,6 +546,25 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+
+	startingBalance := int64(-1)
+	if role == "user" {
+		balance, err := m.getUserTokenBalance(ctx, userID)
+		if err != nil {
+			switch {
+			case errors.Is(err, gorm.ErrRecordNotFound):
+				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			default:
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load token balance"})
+			}
+			return
+		}
+		if balance <= 0 {
+			c.JSON(http.StatusPaymentRequired, gin.H{"error": "insufficient token balance"})
+			return
+		}
+		startingBalance = balance
+	}
 
 	var convID uint64
 	var userMsg message
@@ -527,11 +658,19 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 		return
 	}
 
+	if m.memory != nil {
+		if prefErr := m.memory.upsertSpeechPreferences(ctx, agentID, userID, prefs); prefErr != nil {
+			log.Printf("llm: persist speech preferences: %v", prefErr)
+		}
+	}
+
 	var conv conversation
 	if err := m.db.WithContext(ctx).First(&conv, "id = ?", convID).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load conversation", "details": err.Error()})
 		return
 	}
+
+	m.invalidateRecentMessagesCache(ctx, conv.AgentID, conv.UserID)
 
 	response := createMessageResponse{
 		ConversationID: conv.ID,
@@ -540,17 +679,42 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 		UserMessage:    userRecord,
 	}
 
+	remainingBalance := startingBalance
+	var tokensUsedTotal int64
+
 	if role == "user" && wantsEventStream(c) {
-		m.handleCreateMessageStream(c, conv, userMsg, userRecord, prefs)
+		m.handleCreateMessageStream(c, conv, userMsg, userRecord, prefs, startingBalance)
 		return
 	}
 
 	if role == "user" {
-		assistantRecord, genErr := m.generateAssistantReply(ctx, conv, userMsg, prefs)
+		assistantRecord, usage, genErr := m.generateAssistantReply(ctx, conv, userMsg, prefs)
 		if genErr != nil {
 			response.AssistantError = genErr.Error()
 		} else if assistantRecord != nil {
 			response.AssistantMessage = assistantRecord
+		}
+		if usage != nil {
+			tokensUsedTotal = totalTokensUsed(usage)
+			updatedBalance, err := m.applyUsageToUserTokens(ctx, conv.UserID, usage, startingBalance)
+			if err != nil {
+				log.Printf("llm: failed to apply token usage: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to finalize token usage"})
+				return
+			}
+			remainingBalance = updatedBalance
+		}
+	}
+
+	if startingBalance >= 0 {
+		if remainingBalance < 0 {
+			remainingBalance = 0
+		}
+		response.TokenBalance = int64Pointer(remainingBalance)
+	}
+	if tokensUsedTotal > 0 {
+		if ptr := intPointerIfPositive(int(tokensUsedTotal)); ptr != nil {
+			response.TokensUsed = ptr
 		}
 	}
 
@@ -571,21 +735,17 @@ func parsePositiveUint(value, field string) (uint64, error) {
 	return id, nil
 }
 
-func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, userMsg message, prefs speechPreferences) (*messageRecord, error) {
+func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, userMsg message, prefs speechPreferences) (*messageRecord, *ChatUsage, error) {
 	if m.client == nil {
-		return nil, errors.New("llm client not configured")
+		return nil, nil, errors.New("llm client not configured")
 	}
 
 	contextData, err := m.buildConversationContext(ctx, conv)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	if prefs.VoiceID == "" && contextData.agent.VoiceID != nil {
-		if voice := strings.TrimSpace(*contextData.agent.VoiceID); voice != "" {
-			prefs.VoiceID = voice
-		}
-	}
+	applyPreferenceDefaults(&prefs, contextData)
 
 	start := time.Now()
 	result, err := m.client.Chat(ctx, contextData.messages)
@@ -595,7 +755,7 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 			"err_code": "llm_error",
 			"err_msg":  short,
 		})
-		return nil, err
+		return nil, nil, err
 	}
 	reply := result.Content
 	usage := result.Usage
@@ -671,11 +831,11 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 
 		return tx.Model(&conversation{}).Where("id = ?", conv.ID).Update("last_msg_at", time.Now().UTC()).Error
 	}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if err := m.db.WithContext(ctx).First(&assistant, "id = ?", assistant.ID).Error; err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if usage != nil {
@@ -688,7 +848,15 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 		m.enqueueSpeechSynthesis(assistant.ID, conv, reply, selection, speed, pitch, emotionMeta)
 	}
 
-	return &record, nil
+	if m.memory != nil {
+		if summary, err := m.memory.ensureSummary(ctx, conv); err != nil {
+			log.Printf("llm: update conversation summary: %v", err)
+		} else if summary != "" {
+			conv.Summary = &summary
+		}
+	}
+
+	return &record, usage, nil
 }
 
 func buildSystemPrompt(agent *agents.Agent, cfg *agents.AgentChatConfig) string {
@@ -721,6 +889,124 @@ func buildSystemPrompt(agent *agents.Agent, cfg *agents.AgentChatConfig) string 
 	}
 
 	return strings.Join(parts, "\n\n")
+}
+
+func applyPreferenceDefaults(prefs *speechPreferences, ctxData *conversationContext) {
+	if prefs == nil || ctxData == nil {
+		return
+	}
+
+	profile := ctxData.profile
+	if profile != nil {
+		if prefs.VoiceID == "" {
+			if voice := getPreferenceString(profile.Preferences, "voice_id"); voice != "" {
+				prefs.VoiceID = voice
+			}
+		}
+		if prefs.Provider == "" {
+			if provider := getPreferenceString(profile.Preferences, "voice_provider"); provider != "" {
+				prefs.Provider = provider
+			}
+		}
+		if prefs.EmotionHint == "" {
+			if hint := getPreferenceString(profile.Preferences, "emotion_hint"); hint != "" {
+				prefs.EmotionHint = hint
+			}
+		}
+		if prefs.Speed == 1.0 {
+			if speed, ok := getPreferenceFloat(profile.Preferences, "speech_speed"); ok && speed > 0 {
+				prefs.Speed = speed
+			}
+		}
+		if prefs.Pitch == 1.0 {
+			if pitch, ok := getPreferenceFloat(profile.Preferences, "speech_pitch"); ok && pitch > 0 {
+				prefs.Pitch = pitch
+			}
+		}
+	}
+
+	if prefs.Provider == "" && ctxData.agent.VoiceProvider != nil {
+		if provider := strings.TrimSpace(*ctxData.agent.VoiceProvider); provider != "" {
+			prefs.Provider = provider
+		}
+	}
+	if prefs.VoiceID == "" && ctxData.agent.VoiceID != nil {
+		if voice := strings.TrimSpace(*ctxData.agent.VoiceID); voice != "" {
+			prefs.VoiceID = voice
+		}
+	}
+}
+
+func getPreferenceString(prefs map[string]any, key string) string {
+	if prefs == nil {
+		return ""
+	}
+	value, ok := prefs[key]
+	if !ok {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
+	case json.Number:
+		return strings.TrimSpace(v.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
+func getPreferenceFloat(prefs map[string]any, key string) (float64, bool) {
+	if prefs == nil {
+		return 0, false
+	}
+	value, ok := prefs[key]
+	if !ok {
+		return 0, false
+	}
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case uint:
+		return float64(v), true
+	case uint32:
+		return float64(v), true
+	case uint64:
+		return float64(v), true
+	case json.Number:
+		f, err := v.Float64()
+		if err == nil {
+			return f, true
+		}
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return 0, false
+		}
+		f, err := strconv.ParseFloat(trimmed, 64)
+		if err == nil {
+			return f, true
+		}
+	default:
+		trimmed := strings.TrimSpace(fmt.Sprint(v))
+		if trimmed == "" {
+			return 0, false
+		}
+		f, err := strconv.ParseFloat(trimmed, 64)
+		if err == nil {
+			return f, true
+		}
+	}
+	return 0, false
 }
 
 func truncateString(value string, max int) string {

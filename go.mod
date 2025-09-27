@@ -12,6 +12,7 @@ require (
 	github.com/minio/minio-go/v7 v7.0.95
 	github.com/mojocn/base64Captcha v1.3.8
 	github.com/nwaples/rardecode/v2 v2.1.1
+	github.com/redis/go-redis/v9 v9.14.0
 	golang.org/x/crypto v0.40.0
 	gorm.io/datatypes v1.2.7
 	gorm.io/driver/mysql v1.6.0
@@ -24,7 +25,9 @@ require (
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/bytedance/sonic v1.14.0 // indirect
 	github.com/bytedance/sonic/loader v0.3.0 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.9 // indirect
 	github.com/gin-contrib/sse v1.1.0 // indirect

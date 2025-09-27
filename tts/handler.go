@@ -40,6 +40,20 @@ func (m *Module) DefaultVoiceID() string {
 	return m.client.DefaultVoiceID()
 }
 
+func (m *Module) DefaultProviderID() string {
+	if m == nil || m.client == nil {
+		return ""
+	}
+	return m.client.DefaultProviderID()
+}
+
+func (m *Module) Providers() []ProviderStatus {
+	if m == nil || m.client == nil {
+		return nil
+	}
+	return m.client.Providers()
+}
+
 func (m *Module) Voices() []VoiceOption {
 	if m == nil || m.client == nil {
 		return nil
@@ -54,11 +68,29 @@ func (m *Module) Synthesize(ctx context.Context, req SpeechRequest) (*SpeechResu
 	return m.client.Synthesize(ctx, req)
 }
 
+func (m *Module) Stream(ctx context.Context, req SpeechStreamRequest) (SpeechStreamSession, error) {
+	if m == nil || m.client == nil {
+		return nil, ErrDisabled
+	}
+	return m.client.Stream(ctx, req)
+}
+
+// handleVoices godoc
+// @Summary 查询语音列表
+// @Description 返回当前可用的语音提供方与默认配置
+// @Tags TTS
+// @Produce json
+// @Success 200 {object} map[string]interface{} "语音列表"
+// @Author bizer
+// @Router /tts/voices [get]
 func (m *Module) handleVoices(c *gin.Context) {
+	providers := m.Providers()
 	c.JSON(http.StatusOK, gin.H{
-		"enabled":       m.Enabled(),
-		"default_voice": m.DefaultVoiceID(),
-		"voices":        m.Voices(),
+		"enabled":          m.Enabled(),
+		"default_voice":    m.DefaultVoiceID(),
+		"default_provider": m.DefaultProviderID(),
+		"providers":        providers,
+		"voices":           m.Voices(),
 	})
 }
 
@@ -72,6 +104,19 @@ type previewRequest struct {
 	Format   string   `json:"format"`
 }
 
+// handlePreview godoc
+// @Summary 语音预览
+// @Description 根据文本生成一次性语音预览
+// @Tags TTS
+// @Accept json
+// @Produce json
+// @Param request body previewRequest true "预览参数"
+// @Success 200 {object} map[string]interface{} "预览结果"
+// @Failure 400 {object} map[string]string "请求参数错误"
+// @Failure 503 {object} map[string]string "服务未启用"
+// @Failure 500 {object} map[string]string "服务器错误"
+// @Author bizer
+// @Router /tts/preview [post]
 func (m *Module) handlePreview(c *gin.Context) {
 	if !m.Enabled() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "text-to-speech is disabled"})

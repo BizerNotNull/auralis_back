@@ -23,3 +23,5 @@ vendor/
 # Logs and temp files
 *.log
 tmp/
+
+data/

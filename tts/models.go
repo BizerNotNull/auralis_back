@@ -1,8 +1,6 @@
 package tts
 
-import (
-	"context"
-)
+import "context"
 
 type VoiceOption struct {
 	ID           string        `json:"id"`
@@ -13,6 +11,9 @@ type VoiceOption struct {
 	Emotions     []string      `json:"emotions,omitempty"`
 	SampleURL    string        `json:"sample_url,omitempty"`
 	DefaultStyle string        `json:"default_style,omitempty"`
+	Model        string        `json:"model,omitempty"`
+	Format       string        `json:"format,omitempty"`
+	SampleRate   int           `json:"sample_rate,omitempty"`
 	Settings     VoiceSettings `json:"settings"`
 }
 
@@ -24,15 +25,24 @@ type VoiceSettings struct {
 	SupportsEmotion bool       `json:"supports_emotion"`
 }
 
+type ProviderStatus struct {
+	ID              string `json:"id"`
+	Label           string `json:"label"`
+	Enabled         bool   `json:"enabled"`
+	DefaultVoiceID  string `json:"default_voice,omitempty"`
+	SupportsPreview bool   `json:"supports_preview"`
+}
+
 type SpeechRequest struct {
-	Text         string
-	VoiceID      string
-	Provider     string
-	Emotion      string
-	Speed        float64
-	Pitch        float64
-	Format       string
-	Instructions string
+	Text          string
+	VoiceID       string
+	Provider      string
+	Emotion       string
+	Speed         float64
+	Pitch         float64
+	Format        string
+	Instructions  string
+	ResolvedVoice *VoiceOption `json:"-"`
 }
 
 type SpeechResult struct {
@@ -73,6 +83,48 @@ func (r *SpeechResult) AsMap() map[string]any {
 		payload["duration_ms"] = r.DurationMs
 	}
 	return payload
+}
+
+type SpeechStreamRequest struct {
+	VoiceID       string
+	Provider      string
+	Emotion       string
+	Speed         float64
+	Pitch         float64
+	Format        string
+	Instructions  string
+	InitialText   string
+	ResolvedVoice *VoiceOption `json:"-"`
+}
+
+type SpeechStreamMetadata struct {
+	VoiceID    string
+	Provider   string
+	Format     string
+	MimeType   string
+	SampleRate int
+	Speed      float64
+	Pitch      float64
+	Emotion    string
+}
+
+type SpeechStreamChunk struct {
+	Sequence int
+	Audio    []byte
+}
+
+type SpeechStreamSession interface {
+	Metadata() SpeechStreamMetadata
+	Audio() <-chan SpeechStreamChunk
+	AppendText(ctx context.Context, text string) error
+	Finalize(ctx context.Context) error
+	Err() error
+	Close() error
+}
+
+type StreamingSynthesizer interface {
+	Synthesizer
+	Stream(ctx context.Context, req SpeechStreamRequest) (SpeechStreamSession, error)
 }
 
 type Synthesizer interface {
