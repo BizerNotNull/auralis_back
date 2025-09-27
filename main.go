@@ -8,6 +8,7 @@ import (
 
 	"auralis_back/agents"
 	"auralis_back/authorization"
+	knowledge "auralis_back/knowledge"
 	"auralis_back/live2d"
 	"auralis_back/llm"
 	"auralis_back/tts"
@@ -65,7 +66,8 @@ func main() {
 		authGuard = authModule.Guard()
 	}
 
-	if _, err := agents.RegisterRoutes(r, authGuard); err != nil {
+	agentModule, err := agents.RegisterRoutes(r, authGuard)
+	if err != nil {
 		log.Fatalf("register agent routes: %v", err)
 	}
 	if _, err := live2d.RegisterRoutes(r, authGuard); err != nil {
@@ -75,7 +77,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("register tts routes: %v", err)
 	}
-	if _, err := llm.RegisterRoutes(r, ttsModule); err != nil {
+	var knowledgeSvc *knowledge.Service
+	if agentModule != nil {
+		knowledgeSvc = agentModule.KnowledgeService()
+	}
+	if _, err := llm.RegisterRoutes(r, ttsModule, knowledgeSvc); err != nil {
 		log.Fatalf("register llm routes: %v", err)
 	}
 

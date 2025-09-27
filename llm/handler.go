@@ -3,6 +3,7 @@ package llm
 import (
 	"auralis_back/agents"
 	cache "auralis_back/cache"
+	knowledge "auralis_back/knowledge"
 	"auralis_back/tts"
 	"context"
 	"encoding/json"
@@ -34,10 +35,11 @@ type Module struct {
 	memory       *conversationMemory
 	modelCatalog []ChatModelOption
 	messageCache *messageCache
+	knowledge    *knowledge.Service
 }
 
 // RegisterRoutes mounts the LLM testing endpoint under /llm.
-func RegisterRoutes(router *gin.Engine, synthesizer tts.Synthesizer) (*Module, error) {
+func RegisterRoutes(router *gin.Engine, synthesizer tts.Synthesizer, knowledgeSvc *knowledge.Service) (*Module, error) {
 	client, err := NewChatClientFromEnv()
 	if err != nil {
 		return nil, err
@@ -66,6 +68,7 @@ func RegisterRoutes(router *gin.Engine, synthesizer tts.Synthesizer) (*Module, e
 		memory:       newConversationMemory(db, client),
 		modelCatalog: loadChatModelCatalog(),
 		messageCache: msgCache,
+		knowledge:    knowledgeSvc,
 	}
 
 	group := router.Group("/llm")
@@ -745,6 +748,13 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 		return nil, nil, err
 	}
 
+	var knowledgeSnippets []knowledge.ContextSnippet
+	if snippets, kErr := m.attachKnowledgeContext(ctx, contextData, conv.AgentID, userMsg.Content); kErr != nil {
+		log.Printf("llm: knowledge retrieval failed: %v", kErr)
+	} else if len(snippets) > 0 {
+		knowledgeSnippets = snippets
+	}
+
 	applyPreferenceDefaults(&prefs, contextData)
 
 	start := time.Now()
@@ -771,6 +781,9 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 	emotionMeta := inferEmotion(reply, prefs.EmotionHint)
 
 	extrasPayload := make(map[string]any)
+	if len(knowledgeSnippets) > 0 {
+		extrasPayload["knowledge_refs"] = snippetsToExtras(knowledgeSnippets)
+	}
 	if emotionMeta != nil {
 		extrasPayload["emotion"] = emotionMeta
 	}
@@ -1254,4 +1267,103 @@ func inferEmotion(text, hint string) *emotionMetadata {
 		Reason:          reasonText,
 		SuggestedMotion: motionForEmotion(label, intensity),
 	}
+}
+
+const (
+	knowledgeSnippetLimit    = 4
+	knowledgePromptCharLimit = 480
+)
+
+func (m *Module) attachKnowledgeContext(ctx context.Context, ctxData *conversationContext, agentID uint64, query string) ([]knowledge.ContextSnippet, error) {
+	if m == nil || m.knowledge == nil || ctxData == nil {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return nil, nil
+	}
+
+	snippets, err := m.knowledge.QueryTopChunks(ctx, agentID, trimmed, knowledgeSnippetLimit)
+	if err != nil {
+		return nil, err
+	}
+	if len(snippets) == 0 {
+		return nil, nil
+	}
+
+	prompt := buildKnowledgePrompt(snippets)
+	ctxData.messages = append([]ChatMessage{{Role: "system", Content: prompt}}, ctxData.messages...)
+	ctxData.knowledge = snippets
+	return snippets, nil
+}
+
+func buildKnowledgePrompt(snippets []knowledge.ContextSnippet) string {
+	var builder strings.Builder
+	builder.WriteString("Agent knowledge references (cite as [Ref#] when used):\n")
+	for i, snippet := range snippets {
+		label := fmt.Sprintf("[Ref%d]", i+1)
+		builder.WriteString(label)
+		builder.WriteString(" ")
+		title := strings.TrimSpace(snippet.Title)
+		if title == "" {
+			title = fmt.Sprintf("Document %d", snippet.DocumentID)
+		}
+		builder.WriteString(title)
+		builder.WriteString("\n")
+		if snippet.Source != nil {
+			if source := strings.TrimSpace(*snippet.Source); source != "" {
+				builder.WriteString("Source: ")
+				builder.WriteString(source)
+				builder.WriteString("\n")
+			}
+		}
+		excerpt := truncateForPrompt(snippet.Text, knowledgePromptCharLimit)
+		if excerpt != "" {
+			builder.WriteString(excerpt)
+			builder.WriteString("\n")
+		}
+		builder.WriteString("---\n")
+	}
+	builder.WriteString("Use the knowledge above when it helps, and mention the reference label in brackets when quoting it.")
+	return builder.String()
+}
+
+func snippetsToExtras(snippets []knowledge.ContextSnippet) []map[string]any {
+	if len(snippets) == 0 {
+		return nil
+	}
+	result := make([]map[string]any, 0, len(snippets))
+	for i, snippet := range snippets {
+		item := map[string]any{
+			"ref":         fmt.Sprintf("Ref%d", i+1),
+			"document_id": snippet.DocumentID,
+			"title":       snippet.Title,
+			"seq":         snippet.Seq,
+			"score":       snippet.Score,
+			"vector_id":   snippet.VectorID,
+			"excerpt":     truncateForPrompt(snippet.Text, knowledgePromptCharLimit),
+		}
+		if snippet.Source != nil {
+			if source := strings.TrimSpace(*snippet.Source); source != "" {
+				item["source"] = source
+			}
+		}
+		if len(snippet.Tags) > 0 {
+			item["tags"] = snippet.Tags
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+func truncateForPrompt(text string, max int) string {
+	trimmed := strings.TrimSpace(text)
+	if max <= 0 || trimmed == "" {
+		return trimmed
+	}
+	runes := []rune(trimmed)
+	if len(runes) <= max {
+		return trimmed
+	}
+	return string(runes[:max]) + "…"
 }

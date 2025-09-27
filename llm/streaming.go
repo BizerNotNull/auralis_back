@@ -2,6 +2,7 @@ package llm
 
 import (
 	"auralis_back/agents"
+	knowledge "auralis_back/knowledge"
 	"auralis_back/tts"
 	"bytes"
 	"context"
@@ -74,12 +75,13 @@ func (w *safeSSEWriter) Send(event string, payload any) error {
 }
 
 type conversationContext struct {
-	agent    agents.Agent
-	config   *agents.AgentChatConfig
-	profile  *userProfile
-	summary  string
-	history  []message
-	messages []ChatMessage
+	agent     agents.Agent
+	config    *agents.AgentChatConfig
+	profile   *userProfile
+	summary   string
+	history   []message
+	messages  []ChatMessage
+	knowledge []knowledge.ContextSnippet
 }
 
 func (m *Module) buildConversationContext(ctx context.Context, conv conversation) (*conversationContext, error) {
@@ -471,6 +473,15 @@ func (m *Module) handleCreateMessageStream(
 		return
 	}
 
+	var knowledgeSnippets []knowledge.ContextSnippet
+	if snippets, kErr := m.attachKnowledgeContext(ctx, contextData, conv.AgentID, userMsg.Content); kErr != nil {
+		log.Printf("llm: knowledge retrieval failed: %v", kErr)
+	} else if len(snippets) > 0 {
+		knowledgeSnippets = snippets
+	}
+
+	knowledgeExtras := snippetsToExtras(knowledgeSnippets)
+
 	applyPreferenceDefaults(&prefs, contextData)
 
 	prefs.Speed = sanitizeSpeed(prefs.Speed)
@@ -492,7 +503,20 @@ func (m *Module) handleCreateMessageStream(
 		return
 	}
 
+	var knowledgeExtrasRaw []byte
+	if len(knowledgeExtras) > 0 {
+		if raw, err := json.Marshal(map[string]any{"knowledge_refs": knowledgeExtras}); err == nil {
+			placeholder.Extras = datatypes.JSON(raw)
+			knowledgeExtrasRaw = raw
+		} else {
+			log.Printf("llm: marshal knowledge extras failed: %v", err)
+		}
+	}
+
 	assistantRecord := messageToRecord(placeholder, conv)
+	if len(knowledgeExtrasRaw) > 0 {
+		assistantRecord.Extras = json.RawMessage(knowledgeExtrasRaw)
+	}
 
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache, no-transform")
@@ -795,6 +819,9 @@ func (m *Module) handleCreateMessageStream(
 	emotionMeta := inferEmotion(reply, prefs.EmotionHint)
 
 	extrasPayload := make(map[string]any)
+	if len(knowledgeExtras) > 0 {
+		extrasPayload["knowledge_refs"] = knowledgeExtras
+	}
 	if emotionMeta != nil {
 		extrasPayload["emotion"] = emotionMeta
 	}

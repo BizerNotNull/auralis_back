@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"auralis_back/authorization"
+	knowledge "auralis_back/knowledge"
 	filestore "auralis_back/storage"
 	"auralis_back/tts"
 	jwt "github.com/appleboy/gin-jwt/v2"
@@ -28,6 +29,7 @@ type Module struct {
 	db            *gorm.DB
 	avatars       *filestore.AvatarStorage
 	reviewEnabled bool
+	knowledge     *knowledge.Service
 }
 
 const avatarURLExpiry = 15 * time.Minute
@@ -112,6 +114,14 @@ func RegisterRoutes(router *gin.Engine, guard *authorization.Guard) (*Module, er
 		return nil, err
 	}
 
+	knowledgeService, err := knowledge.NewServiceFromEnv(db)
+	if err != nil {
+		return nil, err
+	}
+	if err := knowledgeService.AutoMigrate(); err != nil {
+		return nil, err
+	}
+
 	avatarStore, err := filestore.NewAvatarStorageFromEnv()
 	if err != nil {
 		return nil, err
@@ -122,7 +132,7 @@ func RegisterRoutes(router *gin.Engine, guard *authorization.Guard) (*Module, er
 		log.Printf("agents: invalid AGENT_REVIEW_ENABLED value: %v", err)
 	}
 
-	module := &Module{db: db, avatars: avatarStore, reviewEnabled: reviewEnabled}
+	module := &Module{db: db, avatars: avatarStore, reviewEnabled: reviewEnabled, knowledge: knowledgeService}
 
 	group := router.Group("/agents")
 	group.GET("", module.handleListAgents)
@@ -142,6 +152,11 @@ func RegisterRoutes(router *gin.Engine, guard *authorization.Guard) (*Module, er
 	}
 	authGroup.POST("", module.handleCreateAgent)
 	authGroup.GET("/mine", module.handleListMyAgents)
+	authGroup.GET("/:id/knowledge", module.handleListKnowledgeDocuments)
+	authGroup.POST("/:id/knowledge", module.handleCreateKnowledgeDocument)
+	authGroup.GET("/:id/knowledge/:docID", module.handleGetKnowledgeDocument)
+	authGroup.PUT("/:id/knowledge/:docID", module.handleUpdateKnowledgeDocument)
+	authGroup.DELETE("/:id/knowledge/:docID", module.handleDeleteKnowledgeDocument)
 	authGroup.PUT("/:id", module.handleUpdateAgent)
 
 	adminGroup := router.Group("/admin/agents")
@@ -201,6 +216,24 @@ type updateAgentRequest struct {
 	SystemPrompt     *string   `json:"system_prompt"`
 	Status           *string   `json:"status"`
 	RemoveAvatar     *bool     `json:"remove_avatar"`
+}
+
+type knowledgeDocumentRequest struct {
+	Title   string   `json:"title"`
+	Summary *string  `json:"summary"`
+	Source  *string  `json:"source"`
+	Content string   `json:"content"`
+	Tags    []string `json:"tags"`
+	Status  string   `json:"status"`
+}
+
+type knowledgeDocumentUpdateRequest struct {
+	Title   *string   `json:"title"`
+	Summary *string   `json:"summary"`
+	Source  *string   `json:"source"`
+	Content *string   `json:"content"`
+	Tags    *[]string `json:"tags"`
+	Status  *string   `json:"status"`
 }
 
 // handleCreateAgent godoc
@@ -1018,6 +1051,365 @@ func (m *Module) handleListMyAgents(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"agents": agents})
+}
+
+// handleListKnowledgeDocuments godoc
+// @Summary 列出智能体知识库文档
+// @Description 返回指定智能体下的知识库文档列表
+// @Tags Agents
+// @Produce json
+// @Param id path int true "智能体 ID"
+// @Success 200 {object} map[string]any
+// @Failure 400 {object} map[string]string
+// @Failure 401 {object} map[string]string
+// @Failure 403 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Failure 500 {object} map[string]string
+func (m *Module) handleListKnowledgeDocuments(c *gin.Context) {
+	if m == nil || m.knowledge == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge service not available"})
+		return
+	}
+
+	agentID, err := parseUintID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid agent id"})
+		return
+	}
+
+	userID, roles := currentUserContext(c)
+	if userID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	_, allowed, err := m.ensureKnowledgeAccess(ctx, agentID, userID, roles)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify access"})
+		}
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		return
+	}
+
+	documents, err := m.knowledge.ListDocuments(ctx, agentID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load documents"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"documents": documents})
+}
+
+// handleGetKnowledgeDocument godoc
+// @Summary 获取智能体知识库文档
+// @Tags Agents
+// @Produce json
+// @Param id path int true "智能体 ID"
+// @Param docID path int true "文档 ID"
+// @Success 200 {object} map[string]any
+// @Failure 400 {object} map[string]string
+// @Failure 401 {object} map[string]string
+// @Failure 403 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Failure 500 {object} map[string]string
+func (m *Module) handleGetKnowledgeDocument(c *gin.Context) {
+	if m == nil || m.knowledge == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge service not available"})
+		return
+	}
+
+	agentID, err := parseUintID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid agent id"})
+		return
+	}
+	docID, err := parseUintID(c.Param("docID"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid document id"})
+		return
+	}
+
+	userID, roles := currentUserContext(c)
+	if userID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	_, allowed, err := m.ensureKnowledgeAccess(ctx, agentID, userID, roles)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify access"})
+		}
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		return
+	}
+
+	document, err := m.knowledge.GetDocument(ctx, agentID, docID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "document not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load document"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"document": document})
+}
+
+// handleCreateKnowledgeDocument godoc
+// @Summary 创建知识库文档
+// @Tags Agents
+// @Accept json
+// @Produce json
+// @Param id path int true "智能体 ID"
+// @Param request body knowledgeDocumentRequest true "文档内容"
+// @Success 201 {object} map[string]any
+// @Failure 400 {object} map[string]string
+// @Failure 401 {object} map[string]string
+// @Failure 403 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Failure 500 {object} map[string]string
+func (m *Module) handleCreateKnowledgeDocument(c *gin.Context) {
+	if m == nil || m.knowledge == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge service not available"})
+		return
+	}
+
+	agentID, err := parseUintID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid agent id"})
+		return
+	}
+
+	userID, roles := currentUserContext(c)
+	if userID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	var req knowledgeDocumentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	_, allowed, err := m.ensureKnowledgeAccess(ctx, agentID, userID, roles)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify access"})
+		}
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		return
+	}
+
+	input := knowledge.DocumentInput{
+		Title:   req.Title,
+		Summary: req.Summary,
+		Source:  req.Source,
+		Content: req.Content,
+		Tags:    req.Tags,
+		Status:  req.Status,
+	}
+
+	record, err := m.knowledge.CreateDocument(ctx, agentID, userID, input)
+	if err != nil {
+		msg := strings.TrimSpace(err.Error())
+		if strings.HasPrefix(msg, "knowledge:") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create document"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"document": record})
+}
+
+// handleUpdateKnowledgeDocument godoc
+// @Summary 更新知识库文档
+// @Tags Agents
+// @Accept json
+// @Produce json
+// @Param id path int true "智能体 ID"
+// @Param docID path int true "文档 ID"
+// @Param request body knowledgeDocumentUpdateRequest true "更新内容"
+// @Success 200 {object} map[string]any
+// @Failure 400 {object} map[string]string
+// @Failure 401 {object} map[string]string
+// @Failure 403 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Failure 500 {object} map[string]string
+func (m *Module) handleUpdateKnowledgeDocument(c *gin.Context) {
+	if m == nil || m.knowledge == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge service not available"})
+		return
+	}
+
+	agentID, err := parseUintID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid agent id"})
+		return
+	}
+	docID, err := parseUintID(c.Param("docID"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid document id"})
+		return
+	}
+
+	userID, roles := currentUserContext(c)
+	if userID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	var req knowledgeDocumentUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
+		return
+	}
+
+	if req.Title == nil && req.Summary == nil && req.Source == nil && req.Content == nil && req.Tags == nil && req.Status == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	_, allowed, err := m.ensureKnowledgeAccess(ctx, agentID, userID, roles)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify access"})
+		}
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		return
+	}
+
+	update := knowledge.DocumentUpdate{}
+	if req.Title != nil {
+		title := strings.TrimSpace(*req.Title)
+		update.Title = &title
+	}
+	if req.Summary != nil {
+		summary := strings.TrimSpace(*req.Summary)
+		update.Summary = &summary
+	}
+	if req.Source != nil {
+		source := strings.TrimSpace(*req.Source)
+		update.Source = &source
+	}
+	if req.Content != nil {
+		content := *req.Content
+		update.Content = &content
+	}
+	if req.Tags != nil {
+		update.Tags = req.Tags
+	}
+	if req.Status != nil {
+		status := strings.TrimSpace(*req.Status)
+		update.Status = &status
+	}
+
+	record, err := m.knowledge.UpdateDocument(ctx, agentID, docID, userID, update)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "document not found"})
+		} else {
+			msg := strings.TrimSpace(err.Error())
+			if strings.HasPrefix(msg, "knowledge:") {
+				c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update document"})
+			}
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"document": record})
+}
+
+// handleDeleteKnowledgeDocument godoc
+// @Summary 删除知识库文档
+// @Tags Agents
+// @Param id path int true "智能体 ID"
+// @Param docID path int true "文档 ID"
+// @Success 204 ""
+// @Failure 400 {object} map[string]string
+// @Failure 401 {object} map[string]string
+// @Failure 403 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Failure 500 {object} map[string]string
+func (m *Module) handleDeleteKnowledgeDocument(c *gin.Context) {
+	if m == nil || m.knowledge == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge service not available"})
+		return
+	}
+
+	agentID, err := parseUintID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid agent id"})
+		return
+	}
+	docID, err := parseUintID(c.Param("docID"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid document id"})
+		return
+	}
+
+	userID, roles := currentUserContext(c)
+	if userID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	_, allowed, err := m.ensureKnowledgeAccess(ctx, agentID, userID, roles)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify access"})
+		}
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		return
+	}
+
+	if err := m.knowledge.DeleteDocument(ctx, agentID, docID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "document not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete document"})
+		}
+		return
+	}
+
+	c.Status(http.StatusNoContent)
 }
 
 // handleAdminListAgents godoc
@@ -1925,6 +2317,39 @@ func parseBoolField(values []string) (*bool, error) {
 		return nil, fmt.Errorf("invalid boolean value")
 	}
 	return &parsed, nil
+}
+
+func parseUintID(raw string) (uint64, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, errors.New("invalid id")
+	}
+	id, err := strconv.ParseUint(trimmed, 10, 64)
+	if err != nil || id == 0 {
+		return 0, errors.New("invalid id")
+	}
+	return id, nil
+}
+
+func (m *Module) ensureKnowledgeAccess(ctx context.Context, agentID, userID uint64, roles []string) (*Agent, bool, error) {
+	if m == nil || m.db == nil {
+		return nil, false, errors.New("database not initialized")
+	}
+	var agent Agent
+	if err := m.db.WithContext(ctx).Where("id = ?", agentID).Take(&agent).Error; err != nil {
+		return nil, false, err
+	}
+	if hasRole(roles, "admin") || agent.CreatedBy == userID {
+		return &agent, true, nil
+	}
+	return &agent, false, nil
+}
+
+func (m *Module) KnowledgeService() *knowledge.Service {
+	if m == nil {
+		return nil
+	}
+	return m.knowledge
 }
 
 func currentUserContext(c *gin.Context) (uint64, []string) {
