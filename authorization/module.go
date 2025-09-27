@@ -59,12 +59,13 @@ var (
 
 // Module wires together the JWT middleware and backing services.
 type Module struct {
-	db            *gorm.DB
-	userStore     *UserStore
-	jwtMiddleware *jwt.GinJWTMiddleware
-	captcha       *CaptchaStore
-	avatarStorage *filestore.AvatarStorage
-	authService   *AuthService
+	db                 *gorm.DB
+	userStore          *UserStore
+	jwtMiddleware      *jwt.GinJWTMiddleware
+	captcha            *CaptchaStore
+	avatarStorage      *filestore.AvatarStorage
+	authService        *AuthService
+	adminRequestMailer *adminRequestMailer
 }
 
 // RegisterRoutes bootstraps the authentication endpoints under /auth.
@@ -106,18 +107,24 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 	}
 	authService := &AuthService{users: userStore}
 
+	mailer, err := newAdminRequestMailerFromEnv()
+	if err != nil {
+		log.Printf("authorization: admin request mailer disabled: %v", err)
+	}
+
 	middleware, err := buildJWTMiddleware(authService, avatarStore)
 	if err != nil {
 		return nil, err
 	}
 
 	module := &Module{
-		db:            db,
-		userStore:     userStore,
-		jwtMiddleware: middleware,
-		captcha:       captchaStore,
-		avatarStorage: avatarStore,
-		authService:   authService,
+		db:                 db,
+		userStore:          userStore,
+		jwtMiddleware:      middleware,
+		captcha:            captchaStore,
+		avatarStorage:      avatarStore,
+		authService:        authService,
+		adminRequestMailer: mailer,
 	}
 
 	authGroup := router.Group("/auth")
@@ -132,6 +139,7 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 	secured.PUT("/profile", module.handleUpdateProfile)
 	secured.POST("/profile/avatar", module.handleUploadAvatar)
 	secured.POST("/tokens/purchase", module.handlePurchaseTokens)
+	secured.POST("/admin-request", module.handleAdminRequest)
 
 	return module, nil
 }
