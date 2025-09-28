@@ -5,3 +5,4 @@
 技术/架构文档 https://shimo.im/docs/loqeMWQo5wCbx0qn/ 《Auralis技术/架构文档-议题二》，可复制链接后用石墨文档 App 打开  
 部署文档 https://shimo.im/docs/XKq42Ma7MyU9eEAN/ 《Auralis部署文档》，可复制链接后用石墨文档 App 打开  
 demo视频 https://www.zhihu.com/zvideo/1955733293745026558  
+文档需要登录，打不开/没权限请联系我
