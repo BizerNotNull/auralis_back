@@ -757,6 +757,7 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 	if err != nil {
 		return nil, nil, err
 	}
+	modelName := contextData.modelName()
 
 	var knowledgeSnippets []knowledge.ContextSnippet
 	if snippets, kErr := m.attachKnowledgeContext(ctx, contextData, conv.AgentID, userMsg.Content); kErr != nil {
@@ -768,7 +769,7 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 	applyPreferenceDefaults(&prefs, contextData)
 
 	start := time.Now()
-	result, err := m.client.Chat(ctx, contextData.messages)
+	result, err := m.client.Chat(ctx, contextData.messages, modelName)
 	if err != nil {
 		short := truncateString(err.Error(), 256)
 		_ = m.db.WithContext(ctx).Model(&message{}).Where("id = ?", userMsg.ID).Updates(map[string]any{
@@ -872,7 +873,7 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 	}
 
 	if m.memory != nil {
-		if summary, err := m.memory.ensureSummary(ctx, conv); err != nil {
+		if summary, err := m.memory.ensureSummary(ctx, conv, modelName); err != nil {
 			log.Printf("llm: update conversation summary: %v", err)
 		} else if summary != "" {
 			conv.Summary = &summary

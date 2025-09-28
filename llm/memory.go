@@ -198,7 +198,7 @@ func (m *conversationMemory) upsertSpeechPreferences(ctx context.Context, agentI
 }
 
 // ensureSummary 在满足条件时生成会话摘要。
-func (m *conversationMemory) ensureSummary(ctx context.Context, conv conversation) (string, error) {
+func (m *conversationMemory) ensureSummary(ctx context.Context, conv conversation, model string) (string, error) {
 	if m == nil || m.cfg.summaryTrigger <= 0 {
 		return "", nil
 	}
@@ -234,7 +234,7 @@ func (m *conversationMemory) ensureSummary(ctx context.Context, conv conversatio
 		history[i], history[j] = history[j], history[i]
 	}
 
-	summary, err := m.generateSummary(ctx, conv, history)
+	summary, err := m.generateSummary(ctx, conv, history, model)
 	if err != nil {
 		return "", err
 	}
@@ -261,7 +261,7 @@ func (m *conversationMemory) ensureSummary(ctx context.Context, conv conversatio
 }
 
 // generateSummary 调用大模型生成会话摘要。
-func (m *conversationMemory) generateSummary(ctx context.Context, conv conversation, history []message) (string, error) {
+func (m *conversationMemory) generateSummary(ctx context.Context, conv conversation, history []message, model string) (string, error) {
 	transcript := buildTranscript(conv, history)
 
 	if m.client == nil {
@@ -272,7 +272,7 @@ func (m *conversationMemory) generateSummary(ctx context.Context, conv conversat
 		{Role: "system", Content: m.cfg.summaryPrompt},
 		{Role: "user", Content: transcript},
 	}
-	result, err := m.client.Chat(ctx, messages)
+	result, err := m.client.Chat(ctx, messages, model)
 	if err != nil {
 		return fallbackSummary(transcript), nil
 	}

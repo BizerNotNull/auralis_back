@@ -88,6 +88,13 @@ type conversationContext struct {
 	knowledge []knowledge.ContextSnippet
 }
 
+func (c *conversationContext) modelName() string {
+	if c == nil || c.config == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.config.ModelName)
+}
+
 // buildConversationContext 构建流式对话所需的上下文信息。
 func (m *Module) buildConversationContext(ctx context.Context, conv conversation) (*conversationContext, error) {
 	var agentModel agents.Agent
@@ -486,6 +493,8 @@ func (m *Module) handleCreateMessageStream(
 		return
 	}
 
+	modelName := contextData.modelName()
+
 	var knowledgeSnippets []knowledge.ContextSnippet
 	if snippets, kErr := m.attachKnowledgeContext(ctx, contextData, conv.AgentID, userMsg.Content); kErr != nil {
 		log.Printf("llm: knowledge retrieval failed: %v", kErr)
@@ -740,12 +749,12 @@ func (m *Module) handleCreateMessageStream(
 		return writer.Send("assistant_delta", payload)
 	}
 
-	streamResult, streamErr := m.client.ChatStream(ctx, contextData.messages, streamHandler)
+	streamResult, streamErr := m.client.ChatStream(ctx, contextData.messages, modelName, streamHandler)
 	reply := streamResult.Content
 	usage := streamResult.Usage
 	if streamErr != nil {
 		log.Printf("llm: streaming fallback to non-streaming: %v", streamErr)
-		fallback, err := m.client.Chat(ctx, contextData.messages)
+		fallback, err := m.client.Chat(ctx, contextData.messages, modelName)
 		if err != nil {
 			_ = writer.Send("error", gin.H{"error": err.Error()})
 			return
@@ -1003,7 +1012,7 @@ func (m *Module) handleCreateMessageStream(
 	}
 
 	if m.memory != nil {
-		if summary, err := m.memory.ensureSummary(ctx, conv); err != nil {
+		if summary, err := m.memory.ensureSummary(ctx, conv, modelName); err != nil {
 			log.Printf("llm: update conversation summary: %v", err)
 		} else if summary != "" {
 			conv.Summary = &summary
