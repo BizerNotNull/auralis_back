@@ -10,10 +10,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// Module 对接语音合成客户端并暴露 HTTP 处理器。
 type Module struct {
 	client *Client
 }
 
+// RegisterRoutes 注册语音合成路由并初始化模块。
 func RegisterRoutes(router *gin.Engine) (*Module, error) {
 	client, err := NewClientFromEnv()
 	if err != nil {
@@ -29,10 +31,12 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 	return module, nil
 }
 
+// Enabled 表示语音模块是否可用。
 func (m *Module) Enabled() bool {
 	return m != nil && m.client != nil && m.client.Enabled()
 }
 
+// DefaultVoiceID 返回默认语音 ID。
 func (m *Module) DefaultVoiceID() string {
 	if m == nil || m.client == nil {
 		return ""
@@ -40,6 +44,7 @@ func (m *Module) DefaultVoiceID() string {
 	return m.client.DefaultVoiceID()
 }
 
+// DefaultProviderID 返回默认语音供应商。
 func (m *Module) DefaultProviderID() string {
 	if m == nil || m.client == nil {
 		return ""
@@ -47,6 +52,7 @@ func (m *Module) DefaultProviderID() string {
 	return m.client.DefaultProviderID()
 }
 
+// Providers 列出可用的语音供应商及状态。
 func (m *Module) Providers() []ProviderStatus {
 	if m == nil || m.client == nil {
 		return nil
@@ -54,6 +60,7 @@ func (m *Module) Providers() []ProviderStatus {
 	return m.client.Providers()
 }
 
+// Voices 返回全部语音选项。
 func (m *Module) Voices() []VoiceOption {
 	if m == nil || m.client == nil {
 		return nil
@@ -61,6 +68,7 @@ func (m *Module) Voices() []VoiceOption {
 	return m.client.Voices()
 }
 
+// Synthesize 调用底层客户端执行语音合成。
 func (m *Module) Synthesize(ctx context.Context, req SpeechRequest) (*SpeechResult, error) {
 	if m == nil || m.client == nil {
 		return nil, ErrDisabled
@@ -68,6 +76,7 @@ func (m *Module) Synthesize(ctx context.Context, req SpeechRequest) (*SpeechResu
 	return m.client.Synthesize(ctx, req)
 }
 
+// Stream 调用底层客户端执行流式语音合成。
 func (m *Module) Stream(ctx context.Context, req SpeechStreamRequest) (SpeechStreamSession, error) {
 	if m == nil || m.client == nil {
 		return nil, ErrDisabled
@@ -94,6 +103,7 @@ func (m *Module) handleVoices(c *gin.Context) {
 	})
 }
 
+// previewRequest 描述语音预览接口的请求参数。
 type previewRequest struct {
 	Text     string   `json:"text" binding:"required"`
 	VoiceID  string   `json:"voice_id"`
@@ -165,6 +175,7 @@ func (m *Module) handlePreview(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"speech": result})
 }
 
+// clampFloat 将浮点值限制在指定范围。
 func clampFloat(value, min, max float64) float64 {
 	if value < min {
 		return min

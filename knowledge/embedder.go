@@ -14,10 +14,12 @@ import (
 	"time"
 )
 
+// Embedder 定义文本向量化能力的接口。
 type Embedder interface {
 	Embed(ctx context.Context, inputs []string) ([][]float32, error)
 }
 
+// httpEmbedder 通过 HTTP 接口调用向量服务。
 type httpEmbedder struct {
 	httpClient  *http.Client
 	baseURL     string
@@ -33,6 +35,7 @@ type httpEmbedder struct {
 	extraHeader http.Header
 }
 
+// embeddingRequest 描述发往向量服务的请求体。
 type embeddingRequest struct {
 	Model      string      `json:"model"`
 	Input      []string    `json:"input"`
@@ -45,6 +48,7 @@ type embeddingRequest struct {
 	OutputType string      `json:"output_type,omitempty"`
 }
 
+// embeddingResponse 对应向量服务返回的数据结构。
 type embeddingResponse struct {
 	Data []struct {
 		Index     int       `json:"index"`
@@ -52,6 +56,7 @@ type embeddingResponse struct {
 	} `json:"data"`
 }
 
+// NewHTTPEmbedderFromEnv 从环境变量初始化 HTTP 向量器。
 func NewHTTPEmbedderFromEnv() (Embedder, error) {
 	apiKey := strings.TrimSpace(os.Getenv("EMBEDDING_API_KEY"))
 	if apiKey == "" {
@@ -155,6 +160,7 @@ func NewHTTPEmbedderFromEnv() (Embedder, error) {
 	}, nil
 }
 
+// Embed 对输入文本批量生成向量表示。
 func (e *httpEmbedder) Embed(ctx context.Context, inputs []string) ([][]float32, error) {
 	if e == nil {
 		return nil, errors.New("knowledge: embedder is not configured")
@@ -191,6 +197,7 @@ func (e *httpEmbedder) Embed(ctx context.Context, inputs []string) ([][]float32,
 	return results, nil
 }
 
+// embedBatch 调用远端接口处理单个批次的嵌入请求。
 func (e *httpEmbedder) embedBatch(ctx context.Context, batch []string) ([][]float32, error) {
 	payload := embeddingRequest{
 		Model: e.modelID,

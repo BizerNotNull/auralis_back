@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Stream 建立与 CosyVoice 的流式会话并返回会话对象。
 func (d *cosyVoiceDriver) Stream(ctx context.Context, req SpeechStreamRequest) (SpeechStreamSession, error) {
 	if d == nil || !d.Enabled() {
 		return nil, ErrDisabled
@@ -195,6 +196,7 @@ func (d *cosyVoiceDriver) Stream(ctx context.Context, req SpeechStreamRequest) (
 	return stream, nil
 }
 
+// cosyVoiceStream 管理 CosyVoice 流式连接的生命周期。
 type cosyVoiceStream struct {
 	driver    *cosyVoiceDriver
 	conn      *websocket.Conn
@@ -214,14 +216,17 @@ type cosyVoiceStream struct {
 	sequence  int32
 }
 
+// Metadata 返回流式会话的元数据。
 func (s *cosyVoiceStream) Metadata() SpeechStreamMetadata {
 	return s.metadata
 }
 
+// Audio 提供流式音频数据的通道。
 func (s *cosyVoiceStream) Audio() <-chan SpeechStreamChunk {
 	return s.audioCh
 }
 
+// AppendText 向会话追加新的待合成文本。
 func (s *cosyVoiceStream) AppendText(ctx context.Context, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return nil
@@ -254,6 +259,7 @@ func (s *cosyVoiceStream) AppendText(ctx context.Context, text string) error {
 	return nil
 }
 
+// Finalize 通知服务端结束文本输入并等待收尾。
 func (s *cosyVoiceStream) Finalize(ctx context.Context) error {
 	if err := s.selectContext(ctx); err != nil {
 		return err
@@ -282,12 +288,14 @@ func (s *cosyVoiceStream) Finalize(ctx context.Context) error {
 	return nil
 }
 
+// Err 返回流式会话过程中出现的错误。
 func (s *cosyVoiceStream) Err() error {
 	s.errMu.Lock()
 	defer s.errMu.Unlock()
 	return s.err
 }
 
+// Close 关闭底层连接并释放资源。
 func (s *cosyVoiceStream) Close() error {
 	s.cancel()
 	s.closeOnce.Do(func() {
@@ -296,6 +304,7 @@ func (s *cosyVoiceStream) Close() error {
 	return nil
 }
 
+// listen 持续读取服务端消息并分发到通道。
 func (s *cosyVoiceStream) listen() {
 	defer func() {
 		s.signalReady()
@@ -376,6 +385,7 @@ func (s *cosyVoiceStream) listen() {
 	}
 }
 
+// waitForReady 等待会话就绪或错误发生。
 func (s *cosyVoiceStream) waitForReady(ctx context.Context) error {
 	for {
 		select {
@@ -397,12 +407,14 @@ func (s *cosyVoiceStream) waitForReady(ctx context.Context) error {
 	}
 }
 
+// signalReady 标记会话已准备好输出。
 func (s *cosyVoiceStream) signalReady() {
 	s.readyOnce.Do(func() {
 		close(s.ready)
 	})
 }
 
+// setErr 记录会话过程中出现的首个错误。
 func (s *cosyVoiceStream) setErr(err error) {
 	if err == nil {
 		return
@@ -414,10 +426,12 @@ func (s *cosyVoiceStream) setErr(err error) {
 	s.errMu.Unlock()
 }
 
+// nextSequence 递增生成音频片段的序号。
 func (s *cosyVoiceStream) nextSequence() int {
 	return int(atomic.AddInt32(&s.sequence, 1))
 }
 
+// selectContext 检查外部上下文是否已取消。
 func (s *cosyVoiceStream) selectContext(ctx context.Context) error {
 	select {
 	case <-s.ctx.Done():

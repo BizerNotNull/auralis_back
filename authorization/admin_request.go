@@ -18,6 +18,7 @@ import (
 	"gorm.io/gorm"
 )
 
+// adminRequestPayload 表示前端提交的管理员申请内容。
 type adminRequestPayload struct {
 	Source   string `json:"source"`
 	Message  string `json:"message"`
@@ -25,6 +26,7 @@ type adminRequestPayload struct {
 	Username string `json:"username"`
 }
 
+// adminRequestMailer 封装 SMTP 参数以发送管理员申请邮件。
 type adminRequestMailer struct {
 	host      string
 	port      int
@@ -35,6 +37,7 @@ type adminRequestMailer struct {
 	subject   string
 }
 
+// newAdminRequestMailerFromEnv 从环境变量加载邮件发送配置。
 func newAdminRequestMailerFromEnv() (*adminRequestMailer, error) {
 	recipient := sanitizeMailHeader(os.Getenv("ADMIN_REQUEST_RECIPIENT_EMAIL"))
 	if recipient == "" {
@@ -82,6 +85,7 @@ func newAdminRequestMailerFromEnv() (*adminRequestMailer, error) {
 	}, nil
 }
 
+// Send 发送管理员申请邮件并附带用户信息。
 func (m *adminRequestMailer) Send(user *User, payload *adminRequestPayload) error {
 	if m == nil {
 		return errors.New("admin request mailer not configured")
@@ -156,6 +160,7 @@ func (m *adminRequestMailer) Send(user *User, payload *adminRequestPayload) erro
 	return smtp.SendMail(address, auth, m.from, []string{m.recipient}, []byte(messageBuilder.String()))
 }
 
+// encodeMailSubject 以 RFC 标准对邮件主题进行编码。
 func encodeMailSubject(subject string) string {
 	if subject == "" {
 		return subject
@@ -167,6 +172,7 @@ func encodeMailSubject(subject string) string {
 	return fmt.Sprintf("=?UTF-8?B?%s?=", encoded)
 }
 
+// isASCII 判断字符串是否全部为 ASCII 字符。
 func isASCII(value string) bool {
 	for i := 0; i < len(value); i++ {
 		if value[i] >= 0x80 {
@@ -176,6 +182,7 @@ func isASCII(value string) bool {
 	return true
 }
 
+// sanitizeMailHeader 清洗邮件头字段避免注入。
 func sanitizeMailHeader(value string) string {
 	trimmed := strings.TrimSpace(value)
 	trimmed = strings.ReplaceAll(trimmed, "\r", " ")
@@ -183,6 +190,7 @@ func sanitizeMailHeader(value string) string {
 	return trimmed
 }
 
+// handleAdminRequest 处理管理员权限申请并触发通知。
 func (m *Module) handleAdminRequest(c *gin.Context) {
 	if m == nil || m.userStore == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "admin request service unavailable"})

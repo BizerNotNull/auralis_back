@@ -15,18 +15,21 @@ import (
 	"time"
 )
 
+// QdrantPoint 表示写入向量数据库的单个点。
 type QdrantPoint struct {
 	ID      string                 `json:"id"`
 	Vector  []float32              `json:"vector"`
 	Payload map[string]interface{} `json:"payload,omitempty"`
 }
 
+// QdrantSearchResult 封装搜索结果及匹配分数。
 type QdrantSearchResult struct {
 	ID      string                 `json:"id"`
 	Score   float64                `json:"score"`
 	Payload map[string]interface{} `json:"payload"`
 }
 
+// qdrantClient 负责与 Qdrant 服务交互。
 type qdrantClient struct {
 	httpClient *http.Client
 	baseURL    string
@@ -34,6 +37,7 @@ type qdrantClient struct {
 	vectorSize int
 }
 
+// newQdrantClientFromEnv 依据环境变量创建 Qdrant 客户端。
 func newQdrantClientFromEnv() (*qdrantClient, error) {
 	baseURL := strings.TrimSpace(os.Getenv("QDRANT_URL"))
 	if baseURL == "" {
@@ -66,6 +70,7 @@ func newQdrantClientFromEnv() (*qdrantClient, error) {
 	return client, nil
 }
 
+// EnsureCollection 确保指定集合存在并具有正确的向量维度。
 func (c *qdrantClient) EnsureCollection(ctx context.Context, name string, vectorSize int) error {
 	if c == nil {
 		return errors.New("knowledge: qdrant client is not configured")
@@ -121,6 +126,7 @@ func (c *qdrantClient) EnsureCollection(ctx context.Context, name string, vector
 	return nil
 }
 
+// UpsertPoints 批量写入或更新向量数据点。
 func (c *qdrantClient) UpsertPoints(ctx context.Context, collection string, points []QdrantPoint) error {
 	if c == nil {
 		return errors.New("knowledge: qdrant client is not configured")
@@ -158,6 +164,7 @@ func (c *qdrantClient) UpsertPoints(ctx context.Context, collection string, poin
 	return nil
 }
 
+// DeletePoints 删除集合中的指定向量点。
 func (c *qdrantClient) DeletePoints(ctx context.Context, collection string, pointIDs []string) error {
 	if c == nil {
 		return errors.New("knowledge: qdrant client is not configured")
@@ -195,6 +202,7 @@ func (c *qdrantClient) DeletePoints(ctx context.Context, collection string, poin
 	return nil
 }
 
+// Search 在集合内执行相似度搜索并返回结果。
 func (c *qdrantClient) Search(ctx context.Context, collection string, vector []float32, limit int, filter map[string]interface{}) ([]QdrantSearchResult, error) {
 	if c == nil {
 		return nil, errors.New("knowledge: qdrant client is not configured")
@@ -264,6 +272,7 @@ func (c *qdrantClient) Search(ctx context.Context, collection string, vector []f
 	return results, nil
 }
 
+// stringifyQdrantID 将返回的点标识统一转换为字符串。
 func stringifyQdrantID(id interface{}) string {
 	switch v := id.(type) {
 	case string:

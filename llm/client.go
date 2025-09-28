@@ -19,7 +19,7 @@ const (
 	defaultModelID = "gpt-oss-120b"
 )
 
-// ChatClient wraps the HTTP calls to the Qiniu/OpenAI compatible chat completions API.
+// ChatClient 封装与七牛/OpenAI 兼容接口的 HTTP 调用。
 type ChatClient struct {
 	httpClient *http.Client
 	baseURL    string
@@ -27,12 +27,12 @@ type ChatClient struct {
 	modelID    string
 }
 
-// NewChatClientFromEnv constructs a ChatClient using environment variables.
+// NewChatClientFromEnv 基于环境变量创建 ChatClient 实例。
 //
 // Expected variables:
 //   - LLM_API_KEY: required API key for the provider
 //   - LLM_BASE_URL: optional override for the API base URL (defaults to defaultBaseURL)
-//   - LLM_MODEL_ID: optional override for the target model (defaults to defaultModelID)
+// NewChatClientFromEnv 基于环境变量创建 ChatClient 实例。
 func NewChatClientFromEnv() (*ChatClient, error) {
 	apiKey := strings.TrimSpace(os.Getenv("LLM_API_KEY"))
 	if apiKey == "" {
@@ -63,33 +63,33 @@ func NewChatClientFromEnv() (*ChatClient, error) {
 	}, nil
 }
 
-// ChatMessage represents a single turn in a chat conversation payload.
+// ChatMessage 表示聊天请求中的单轮消息。
 type ChatMessage struct {
 	Role    string
 	Content string
 }
 
-// chatCompletionMessage matches the API payload structure for messages.
+// chatCompletionMessage 对应接口要求的消息结构。
 type chatCompletionMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-// chatCompletionRequest represents the request body sent to the model.
+// chatCompletionRequest 描述发送给模型的请求体。
 type chatCompletionRequest struct {
 	Model    string                  `json:"model"`
 	Stream   bool                    `json:"stream"`
 	Messages []chatCompletionMessage `json:"messages"`
 }
 
-// chatCompletionUsage captures token accounting returned by the API.
+// chatCompletionUsage 记录模型返回的 token 统计。
 type chatCompletionUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// chatCompletionResponse captures the subset of fields we consume.
+// chatCompletionResponse 表示响应中需要使用的字段。
 type chatCompletionResponse struct {
 	Choices []struct {
 		Message chatCompletionMessage `json:"message"`
@@ -104,7 +104,7 @@ type ChatStreamDelta struct {
 	Done         bool
 }
 
-// chatStreamChunk mirrors the streaming delta payload from the provider.
+// chatStreamChunk 映射供应商返回的流式增量数据。
 
 type chatStreamChunk struct {
 	Choices []struct {
@@ -116,20 +116,20 @@ type chatStreamChunk struct {
 	Usage *chatCompletionUsage `json:"usage"`
 }
 
-// ChatUsage captures token usage metrics returned by the provider.
+// ChatUsage 表示模型返回的 token 使用情况。
 type ChatUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// ChatResult represents the content and usage information for a chat completion.
+// ChatResult 组合模型回复内容与使用信息。
 type ChatResult struct {
 	Content string
 	Usage   *ChatUsage
 }
 
-// Complete sends the given prompt to the chat completions API and returns the response with usage metrics.
+// Complete 调用补全接口获取完整回复。
 func (c *ChatClient) Complete(ctx context.Context, prompt string) (ChatResult, error) {
 	trimmed := strings.TrimSpace(prompt)
 	if trimmed == "" {
@@ -142,7 +142,7 @@ func (c *ChatClient) Complete(ctx context.Context, prompt string) (ChatResult, e
 	})
 }
 
-// Chat sends the provided conversational messages to the LLM and returns the first assistant reply with usage metrics.
+// Chat 调用补全接口并将结果整合为 ChatResult。
 func (c *ChatClient) Chat(ctx context.Context, messages []ChatMessage) (ChatResult, error) {
 	if c == nil {
 		return ChatResult{}, errors.New("llm: client is nil")
@@ -214,7 +214,7 @@ func (c *ChatClient) Chat(ctx context.Context, messages []ChatMessage) (ChatResu
 	}, nil
 }
 
-// ChatStream sends the provided messages with streaming enabled and invokes handler for each delta.
+// Chat 调用补全接口并将结果整合为 ChatResult。
 func (c *ChatClient) ChatStream(ctx context.Context, messages []ChatMessage, handler func(ChatStreamDelta) error) (ChatResult, error) {
 	if c == nil {
 		return ChatResult{}, errors.New("llm: client is nil")
@@ -375,6 +375,7 @@ func (c *ChatClient) ChatStream(ctx context.Context, messages []ChatMessage, han
 	}, nil
 }
 
+// convertUsage 将底层的 token 统计转换为公共结构。
 func convertUsage(raw *chatCompletionUsage) *ChatUsage {
 	if raw == nil {
 		return nil

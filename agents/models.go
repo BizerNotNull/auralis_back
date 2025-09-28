@@ -6,6 +6,7 @@ import (
 	"gorm.io/datatypes"
 )
 
+// Agent 表示可供用户交互的智能体核心信息模型。
 type Agent struct {
 	ID               uint64         `gorm:"primaryKey" json:"id"`
 	Name             string         `gorm:"size:100;not null" json:"name"`
@@ -33,10 +34,12 @@ type Agent struct {
 	UpdatedAt        time.Time      `json:"updated_at"`
 }
 
+// TableName 指定 Agent 模型对应的数据库表名。
 func (Agent) TableName() string {
 	return "agents"
 }
 
+// AgentRating 记录用户针对智能体的评分与可选评价内容。
 type AgentRating struct {
 	ID        uint64    `gorm:"primaryKey" json:"id"`
 	AgentID   uint64    `gorm:"not null;index:idx_agent_user,unique" json:"agent_id"`
@@ -47,10 +50,12 @@ type AgentRating struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// TableName 指定 AgentRating 模型的存储表。
 func (AgentRating) TableName() string {
 	return "agent_ratings"
 }
 
+// AgentChatConfig 保存智能体使用的大模型及补充配置。
 type AgentChatConfig struct {
 	AgentID          uint64         `gorm:"primaryKey" json:"agent_id"`
 	ModelProvider    string         `gorm:"size:50;not null" json:"model_provider"`
@@ -66,6 +71,7 @@ type AgentChatConfig struct {
 	UpdatedAt        time.Time      `json:"updated_at"`
 }
 
+// TableName 指定 AgentChatConfig 的数据库表名。
 func (AgentChatConfig) TableName() string {
 	return "agent_chat_config"
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 )
 
+// ChatModelOption 描述可选的聊天模型及能力标签。
 type ChatModelOption struct {
 	Provider     string   `json:"provider"`
 	Name         string   `json:"name"`
@@ -64,6 +65,7 @@ var defaultChatModelCatalog = []ChatModelOption{
 	},
 }
 
+// loadChatModelCatalog 加载模型目录（支持环境变量覆盖）。
 func loadChatModelCatalog() []ChatModelOption {
 	if catalog := loadChatModelCatalogFromEnv(); len(catalog) > 0 {
 		return catalog
@@ -71,6 +73,7 @@ func loadChatModelCatalog() []ChatModelOption {
 	return append([]ChatModelOption(nil), defaultChatModelCatalog...)
 }
 
+// loadChatModelCatalogFromEnv 从环境变量或文件读取模型目录。
 func loadChatModelCatalogFromEnv() []ChatModelOption {
 	rawInline := strings.TrimSpace(os.Getenv("LLM_MODEL_CATALOG"))
 	if rawInline != "" {

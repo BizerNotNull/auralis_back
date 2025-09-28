@@ -21,8 +21,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// ErrDisabled 表示语音服务未启用或配置缺失。
 var ErrDisabled = errors.New("tts: service disabled")
 
+// Client 聚合多种语音供应商并提供统一调用入口。
 type Client struct {
 	httpClient         *http.Client
 	qiniu              *qiniuDriver
@@ -37,6 +39,7 @@ type Client struct {
 	enabled            bool
 }
 
+// NewClientFromEnv 基于环境变量初始化语音客户端。
 func NewClientFromEnv() (*Client, error) {
 	httpClient := &http.Client{Timeout: 45 * time.Second}
 
@@ -53,10 +56,12 @@ func NewClientFromEnv() (*Client, error) {
 	return client, nil
 }
 
+// Enabled 表示客户端是否已启用可用的语音供应商。
 func (c *Client) Enabled() bool {
 	return c != nil && c.enabled
 }
 
+// DefaultVoiceID 返回全局默认的语音 ID。
 func (c *Client) DefaultVoiceID() string {
 	if c == nil {
 		return ""
@@ -64,6 +69,7 @@ func (c *Client) DefaultVoiceID() string {
 	return c.defaultVoice
 }
 
+// DefaultProviderID 返回默认语音供应商标识。
 func (c *Client) DefaultProviderID() string {
 	if c == nil {
 		return ""
@@ -71,6 +77,7 @@ func (c *Client) DefaultProviderID() string {
 	return c.defaultProvider
 }
 
+// Voices 返回可用语音选项的拷贝。
 func (c *Client) Voices() []VoiceOption {
 	if c == nil {
 		return nil
@@ -80,6 +87,7 @@ func (c *Client) Voices() []VoiceOption {
 	return out
 }
 
+// Providers 返回语音供应商状态列表。
 func (c *Client) Providers() []ProviderStatus {
 	if c == nil {
 		return nil
@@ -89,6 +97,7 @@ func (c *Client) Providers() []ProviderStatus {
 	return out
 }
 
+// Synthesize 调度对应供应商执行语音合成。
 func (c *Client) Synthesize(ctx context.Context, req SpeechRequest) (*SpeechResult, error) {
 	if c == nil {
 		return nil, ErrDisabled
@@ -142,6 +151,7 @@ func (c *Client) Synthesize(ctx context.Context, req SpeechRequest) (*SpeechResu
 	}
 }
 
+// Stream 调度对应供应商执行流式语音合成。
 func (c *Client) Stream(ctx context.Context, req SpeechStreamRequest) (SpeechStreamSession, error) {
 	if c == nil {
 		return nil, ErrDisabled
@@ -186,6 +196,7 @@ func (c *Client) Stream(ctx context.Context, req SpeechStreamRequest) (SpeechStr
 	}
 }
 
+// voiceOption 按 ID 查找已加载的语音配置。
 func (c *Client) voiceOption(id string) *VoiceOption {
 	if c == nil {
 		return nil
@@ -201,6 +212,7 @@ func (c *Client) voiceOption(id string) *VoiceOption {
 	return nil
 }
 
+// bootstrapVoiceCatalog 载入并整理语音与供应商目录。
 func (c *Client) bootstrapVoiceCatalog() {
 	if c == nil {
 		return
@@ -305,6 +317,7 @@ func (c *Client) bootstrapVoiceCatalog() {
 	}
 }
 
+// qiniuDriver 对接七牛语音合成服务。
 type qiniuDriver struct {
 	httpClient     *http.Client
 	baseURL        string
@@ -318,6 +331,7 @@ type qiniuDriver struct {
 	enabled        bool
 }
 
+// newQiniuDriverFromEnv 基于环境变量创建七牛驱动。
 func newQiniuDriverFromEnv(httpClient *http.Client) *qiniuDriver {
 	baseURL := strings.TrimSpace(firstNonEmpty(
 		os.Getenv("TTS_QINIU_API_BASE_URL"),
@@ -383,6 +397,7 @@ func newQiniuDriverFromEnv(httpClient *http.Client) *qiniuDriver {
 	}
 }
 
+// ProviderID 返回七牛驱动的供应商标识。
 func (d *qiniuDriver) ProviderID() string {
 	if d == nil {
 		return "qiniu-openai"
@@ -390,10 +405,12 @@ func (d *qiniuDriver) ProviderID() string {
 	return d.providerID
 }
 
+// Enabled 表示七牛驱动是否可用。
 func (d *qiniuDriver) Enabled() bool {
 	return d != nil && d.enabled
 }
 
+// DefaultVoiceID 返回七牛默认语音 ID。
 func (d *qiniuDriver) DefaultVoiceID() string {
 	if d == nil {
 		return ""
@@ -401,6 +418,7 @@ func (d *qiniuDriver) DefaultVoiceID() string {
 	return d.defaultVoice
 }
 
+// ensureVoices 懒加载并缓存七牛语音列表。
 func (d *qiniuDriver) ensureVoices(ctx context.Context) []VoiceOption {
 	if d == nil {
 		return nil
@@ -424,6 +442,7 @@ func (d *qiniuDriver) ensureVoices(ctx context.Context) []VoiceOption {
 	return out
 }
 
+// status 构造七牛供应商的状态信息。
 func (d *qiniuDriver) status() ProviderStatus {
 	if d == nil {
 		return ProviderStatus{
@@ -446,6 +465,7 @@ func (d *qiniuDriver) status() ProviderStatus {
 	}
 }
 
+// Synthesize 向七牛接口发起语音合成请求。
 func (d *qiniuDriver) Synthesize(ctx context.Context, req SpeechRequest) (*SpeechResult, error) {
 	if d == nil || !d.Enabled() {
 		return nil, ErrDisabled
@@ -576,6 +596,7 @@ func (d *qiniuDriver) Synthesize(ctx context.Context, req SpeechRequest) (*Speec
 	return nil, errors.New("tts: no valid voices available")
 }
 
+// requestWithFallback 在主备域名间重试语音请求。
 func (d *qiniuDriver) requestWithFallback(ctx context.Context, body []byte) (*http.Response, error) {
 	if d == nil {
 		return nil, ErrDisabled
@@ -621,6 +642,7 @@ func (d *qiniuDriver) requestWithFallback(ctx context.Context, body []byte) (*ht
 	return nil, fmt.Errorf("tts: request failed")
 }
 
+// doRequest 执行具体的 HTTP 语音合成请求。
 func (d *qiniuDriver) doRequest(ctx context.Context, client *http.Client, base string, body []byte) (*http.Response, error) {
 	endpoint := strings.TrimRight(base, "/") + "/voice/tts"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
@@ -632,6 +654,7 @@ func (d *qiniuDriver) doRequest(ctx context.Context, client *http.Client, base s
 	return client.Do(req)
 }
 
+// processTTSResponse 解析七牛返回的语音数据。
 func (d *qiniuDriver) processTTSResponse(body []byte, fallbackFormat, contentType string) ([]byte, string, error) {
 	trimmedContentType := strings.ToLower(strings.TrimSpace(contentType))
 	if strings.Contains(trimmedContentType, "json") || (len(body) > 0 && (body[0] == '{' || body[0] == '[')) {
@@ -660,6 +683,7 @@ func (d *qiniuDriver) processTTSResponse(body []byte, fallbackFormat, contentTyp
 	return body, mime, nil
 }
 
+// fetchVoiceCatalog 从七牛接口拉取语音目录。
 func (d *qiniuDriver) fetchVoiceCatalog(ctx context.Context) []VoiceOption {
 	bases := orderedDistinct([]string{d.baseURL, d.backupBaseURL})
 	client := d.httpClient
@@ -782,6 +806,7 @@ func loadVoiceCatalogFromEnv() []VoiceOption {
 	return nil
 }
 
+// defaultQiniuVoiceCatalog 返回内置的七牛语音列表。
 func defaultQiniuVoiceCatalog() []VoiceOption {
 	baseSettings := VoiceSettings{
 		SpeedRange:      [2]float64{0.5, 1.5},
@@ -1179,6 +1204,7 @@ func defaultQiniuVoiceCatalog() []VoiceOption {
 	return voices
 }
 
+// fetchVoiceCatalogFromURL 从指定地址下载语音目录。
 func fetchVoiceCatalogFromURL(target, sourceLabel string) []VoiceOption {
 	trimmed := strings.TrimSpace(target)
 	if trimmed == "" {
@@ -1230,6 +1256,7 @@ func fetchVoiceCatalogFromURL(target, sourceLabel string) []VoiceOption {
 	return voices
 }
 
+// parseVoiceCatalogPayload 解析语音目录的 JSON 内容。
 func parseVoiceCatalogPayload(data []byte) ([]VoiceOption, error) {
 	var direct []VoiceOption
 	directErr := json.Unmarshal(data, &direct)
@@ -1255,6 +1282,7 @@ func parseVoiceCatalogPayload(data []byte) ([]VoiceOption, error) {
 	return nil, fmt.Errorf("voice catalog payload is empty")
 }
 
+// cosyVoiceDriver 对接阿里云 CosyVoice 流式与离线语音服务。
 type cosyVoiceDriver struct {
 	endpoint       string
 	apiKey         string
@@ -1271,6 +1299,7 @@ type cosyVoiceDriver struct {
 	enabled        bool
 }
 
+// newCosyVoiceDriverFromEnv 基于环境变量创建 CosyVoice 驱动。
 func newCosyVoiceDriverFromEnv() *cosyVoiceDriver {
 	endpoint := strings.TrimSpace(firstNonEmpty(
 		os.Getenv("COSYVOICE_WS_URL"),
@@ -1359,6 +1388,7 @@ func newCosyVoiceDriverFromEnv() *cosyVoiceDriver {
 	}
 }
 
+// ProviderID 返回 CosyVoice 的供应商标识。
 func (d *cosyVoiceDriver) ProviderID() string {
 	if d == nil {
 		return "aliyun-cosyvoice"
@@ -1366,10 +1396,12 @@ func (d *cosyVoiceDriver) ProviderID() string {
 	return d.providerID
 }
 
+// Enabled 表示 CosyVoice 驱动是否可用。
 func (d *cosyVoiceDriver) Enabled() bool {
 	return d != nil && d.enabled
 }
 
+// DefaultVoiceID 返回 CosyVoice 默认语音。
 func (d *cosyVoiceDriver) DefaultVoiceID() string {
 	if d == nil {
 		return ""
@@ -1377,6 +1409,7 @@ func (d *cosyVoiceDriver) DefaultVoiceID() string {
 	return d.defaultVoice
 }
 
+// ensureVoices 懒加载 CosyVoice 的语音目录。
 func (d *cosyVoiceDriver) ensureVoices() []VoiceOption {
 	if d == nil {
 		return nil
@@ -1409,6 +1442,7 @@ func (d *cosyVoiceDriver) ensureVoices() []VoiceOption {
 	return out
 }
 
+// status 构造 CosyVoice 供应商状态。
 func (d *cosyVoiceDriver) status() ProviderStatus {
 	if d == nil {
 		return ProviderStatus{
@@ -1431,6 +1465,7 @@ func (d *cosyVoiceDriver) status() ProviderStatus {
 	}
 }
 
+// Synthesize 调用 CosyVoice 生成语音。
 func (d *cosyVoiceDriver) Synthesize(ctx context.Context, req SpeechRequest) (*SpeechResult, error) {
 	if d == nil || !d.Enabled() {
 		return nil, ErrDisabled
@@ -1636,6 +1671,7 @@ func (d *cosyVoiceDriver) Synthesize(ctx context.Context, req SpeechRequest) (*S
 	return result, nil
 }
 
+// waitForCosyEvent 等待 CosyVoice 返回任务事件。
 func (d *cosyVoiceDriver) waitForCosyEvent(ctx context.Context, conn *websocket.Conn, taskID string, target string, audioBuf *bytes.Buffer) error {
 	target = strings.ToLower(strings.TrimSpace(target))
 	for {
@@ -1727,6 +1763,7 @@ func loadCosyVoiceCatalogFromEnv() []VoiceOption {
 	return nil
 }
 
+// defaultCosyVoiceCatalog 返回 CosyVoice 的内置语音列表。
 func defaultCosyVoiceCatalog() []VoiceOption {
 	baseSettings := VoiceSettings{
 		SpeedRange:      [2]float64{0.6, 1.6},
@@ -1984,6 +2021,7 @@ func defaultCosyVoiceCatalog() []VoiceOption {
 	return out
 }
 
+// orderedDistinct 在保持顺序的同时去重语音列表。
 func orderedDistinct(values []string) []string {
 	seen := make(map[string]struct{}, len(values))
 	out := make([]string, 0, len(values))
@@ -1999,6 +2037,7 @@ func orderedDistinct(values []string) []string {
 	return out
 }
 
+// containsVoiceID 判断语音列表中是否存在目标 ID。
 func containsVoiceID(list []VoiceOption, id string) bool {
 	trimmed := strings.TrimSpace(id)
 	if trimmed == "" {
@@ -2012,6 +2051,7 @@ func containsVoiceID(list []VoiceOption, id string) bool {
 	return false
 }
 
+// encodingToMime 将音频编码转换为 MIME 类型。
 func encodingToMime(encoding string) string {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "mp3", "mpeg", "audio/mpeg":
@@ -2027,6 +2067,7 @@ func encodingToMime(encoding string) string {
 	}
 }
 
+// decodeAudioFromJSON 解析接口返回的音频数据。
 func decodeAudioFromJSON(body []byte) ([]byte, string, error) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
@@ -2070,6 +2111,7 @@ func decodeAudioFromJSON(body []byte) ([]byte, string, error) {
 	return nil, "", errors.New("tts: json response missing audio content")
 }
 
+// isInvalidVoiceError 判断错误是否由语音 ID 不存在导致。
 func isInvalidVoiceError(status int, body []byte) (bool, string) {
 	if status < 400 {
 		return false, ""
@@ -2105,6 +2147,7 @@ func isInvalidVoiceError(status int, body []byte) (bool, string) {
 	return false, ""
 }
 
+// NormalizeProviderID 规范化语音供应商标识。
 func NormalizeProviderID(value string) string {
 	trimmed := strings.ToLower(strings.TrimSpace(value))
 	switch trimmed {
@@ -2117,6 +2160,7 @@ func NormalizeProviderID(value string) string {
 	}
 }
 
+// firstNonEmpty 返回首个非空字符串。
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		trimmed := strings.TrimSpace(v)
@@ -2151,6 +2195,7 @@ var preservedPauseRunes = map[rune]struct{}{
 	'、': {},
 }
 
+// normalizeSpeechText 清洗待合成文本确保朗读效果。
 func normalizeSpeechText(value string) string {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {

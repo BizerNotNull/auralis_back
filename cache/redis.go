@@ -18,8 +18,8 @@ var (
 	redisErr    error
 )
 
-// GetRedisClient returns a singleton Redis client configured from environment variables.
-// REDIS_ADDR defaults to localhost:6379 when unset. REDIS_DB and REDIS_PASSWORD are optional.
+// GetRedisClient 根据环境变量初始化并返回单例 Redis 客户端。
+// 若未配置 REDIS_ADDR 则默认为 localhost:6379，REDIS_DB 与 REDIS_PASSWORD 为可选项。
 func GetRedisClient() (*redis.Client, error) {
 	redisOnce.Do(func() {
 		addr := strings.TrimSpace(os.Getenv("REDIS_ADDR"))
@@ -55,13 +55,13 @@ func GetRedisClient() (*redis.Client, error) {
 	return redisClient, redisErr
 }
 
-// Enabled reports whether a usable Redis client was initialized.
+// Enabled 指示 Redis 客户端是否已正确初始化。
 func Enabled() bool {
 	client, err := GetRedisClient()
 	return err == nil && client != nil
 }
 
-// Close releases the cached Redis connection. Mainly useful for tests.
+// Close 释放缓存的 Redis 连接，主要用于测试场景。
 func Close() error {
 	if redisClient == nil {
 		return nil

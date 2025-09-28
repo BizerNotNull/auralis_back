@@ -2,6 +2,7 @@ package tts
 
 import "context"
 
+// VoiceOption 描述可供选择的语音参数。
 type VoiceOption struct {
 	ID           string        `json:"id"`
 	Name         string        `json:"name"`
@@ -17,6 +18,7 @@ type VoiceOption struct {
 	Settings     VoiceSettings `json:"settings"`
 }
 
+// VoiceSettings 定义语速音调的取值范围与默认值。
 type VoiceSettings struct {
 	SpeedRange      [2]float64 `json:"speed_range"`
 	PitchRange      [2]float64 `json:"pitch_range"`
@@ -25,6 +27,7 @@ type VoiceSettings struct {
 	SupportsEmotion bool       `json:"supports_emotion"`
 }
 
+// ProviderStatus 表示语音服务供应商的可用状态。
 type ProviderStatus struct {
 	ID              string `json:"id"`
 	Label           string `json:"label"`
@@ -33,6 +36,7 @@ type ProviderStatus struct {
 	SupportsPreview bool   `json:"supports_preview"`
 }
 
+// SpeechRequest 表示一次语音合成请求。
 type SpeechRequest struct {
 	Text          string
 	VoiceID       string
@@ -45,6 +49,7 @@ type SpeechRequest struct {
 	ResolvedVoice *VoiceOption `json:"-"`
 }
 
+// SpeechResult 保存语音合成的结果数据。
 type SpeechResult struct {
 	VoiceID     string  `json:"voice_id"`
 	Emotion     string  `json:"emotion,omitempty"`
@@ -57,6 +62,7 @@ type SpeechResult struct {
 	AudioURL    string  `json:"audio_url,omitempty"`
 }
 
+// AsMap 将语音合成结果转换为通用字典。
 func (r *SpeechResult) AsMap() map[string]any {
 	if r == nil {
 		return nil
@@ -85,6 +91,7 @@ func (r *SpeechResult) AsMap() map[string]any {
 	return payload
 }
 
+// SpeechStreamRequest 描述流式语音合成的参数。
 type SpeechStreamRequest struct {
 	VoiceID       string
 	Provider      string
@@ -97,6 +104,7 @@ type SpeechStreamRequest struct {
 	ResolvedVoice *VoiceOption `json:"-"`
 }
 
+// SpeechStreamMetadata 返回流式会话的基础信息。
 type SpeechStreamMetadata struct {
 	VoiceID    string
 	Provider   string
@@ -108,11 +116,13 @@ type SpeechStreamMetadata struct {
 	Emotion    string
 }
 
+// SpeechStreamChunk 表示流式语音的单个音频片段。
 type SpeechStreamChunk struct {
 	Sequence int
 	Audio    []byte
 }
 
+// SpeechStreamSession 定义流式语音会话的行为接口。
 type SpeechStreamSession interface {
 	Metadata() SpeechStreamMetadata
 	Audio() <-chan SpeechStreamChunk
@@ -122,11 +132,13 @@ type SpeechStreamSession interface {
 	Close() error
 }
 
+// StreamingSynthesizer 扩展合成器以支持流式能力。
 type StreamingSynthesizer interface {
 	Synthesizer
 	Stream(ctx context.Context, req SpeechStreamRequest) (SpeechStreamSession, error)
 }
 
+// Synthesizer 定义语音合成器的通用接口。
 type Synthesizer interface {
 	Enabled() bool
 	DefaultVoiceID() string

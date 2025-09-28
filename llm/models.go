@@ -6,6 +6,7 @@ import (
 	"gorm.io/datatypes"
 )
 
+// conversation 持久化用户与智能体之间的会话信息。
 type conversation struct {
 	ID               uint64     `gorm:"primaryKey"`
 	AgentID          uint64     `gorm:"column:agent_id;index:idx_conversations_user_agent,priority:2"`
@@ -25,10 +26,12 @@ type conversation struct {
 	UpdatedAt        time.Time  `gorm:"column:updated_at"`
 }
 
+// TableName 指定会话模型的数据库表名。
 func (conversation) TableName() string {
 	return "conversations"
 }
 
+// message 保存会话中的单条消息内容。
 type message struct {
 	ID              uint64         `gorm:"primaryKey"`
 	ConversationID  uint64         `gorm:"column:conversation_id"`
@@ -46,10 +49,12 @@ type message struct {
 	CreatedAt       time.Time      `gorm:"column:created_at"`
 }
 
+// TableName 指定消息模型的存储表。
 func (message) TableName() string {
 	return "messages"
 }
 
+// userAgentMemory 记录用户与智能体的个性化记忆数据。
 type userAgentMemory struct {
 	ID             uint64         `gorm:"primaryKey"`
 	AgentID        uint64         `gorm:"column:agent_id;not null;uniqueIndex:idx_user_agent_memory,priority:2"`
@@ -61,6 +66,7 @@ type userAgentMemory struct {
 	UpdatedAt      time.Time      `gorm:"column:updated_at"`
 }
 
+// TableName 指定用户记忆表名称。
 func (userAgentMemory) TableName() string {
 	return "user_agent_memory"
 }

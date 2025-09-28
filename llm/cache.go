@@ -15,10 +15,12 @@ const (
 	recentMessagesCacheTimeout = 300 * time.Millisecond
 )
 
+// messageCache 缓存用户与智能体的近期消息。
 type messageCache struct {
 	client *redis.Client
 }
 
+// newMessageCache 使用 Redis 客户端创建消息缓存。
 func newMessageCache(client *redis.Client) *messageCache {
 	if client == nil {
 		return nil
@@ -26,6 +28,7 @@ func newMessageCache(client *redis.Client) *messageCache {
 	return &messageCache{client: client}
 }
 
+// cacheContext 为缓存操作设置超时上下文。
 func (m *messageCache) cacheContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx == nil {
 		return context.WithTimeout(context.Background(), recentMessagesCacheTimeout)
@@ -36,6 +39,7 @@ func (m *messageCache) cacheContext(ctx context.Context) (context.Context, conte
 	return context.WithTimeout(ctx, recentMessagesCacheTimeout)
 }
 
+// key 构造缓存键格式。
 func (m *messageCache) key(agentID, userID uint64) string {
 	if m == nil || m.client == nil || agentID == 0 || userID == 0 {
 		return ""
@@ -43,6 +47,7 @@ func (m *messageCache) key(agentID, userID uint64) string {
 	return fmt.Sprintf("llm:recent:%d:%d", agentID, userID)
 }
 
+// get 从缓存中读取近期消息记录。
 func (m *messageCache) get(ctx context.Context, agentID, userID uint64) ([]messageRecord, error) {
 	if m == nil || m.client == nil {
 		return nil, redis.Nil
@@ -67,6 +72,7 @@ func (m *messageCache) get(ctx context.Context, agentID, userID uint64) ([]messa
 	return records, nil
 }
 
+// store 将近期消息写入缓存。
 func (m *messageCache) store(ctx context.Context, agentID, userID uint64, records []messageRecord) {
 	if m == nil || m.client == nil {
 		return
@@ -90,6 +96,7 @@ func (m *messageCache) store(ctx context.Context, agentID, userID uint64, record
 	}
 }
 
+// invalidate 清除指定用户与智能体的缓存。
 func (m *messageCache) invalidate(ctx context.Context, agentID, userID uint64) {
 	if m == nil || m.client == nil {
 		return

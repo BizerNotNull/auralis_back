@@ -23,7 +23,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// wantsEventStream determines if the client requested a streaming response.
+// wantsEventStream 判断客户端是否请求流式返回。
 func wantsEventStream(c *gin.Context) bool {
 	accept := strings.ToLower(strings.TrimSpace(c.GetHeader("Accept")))
 	if strings.Contains(accept, "text/event-stream") {
@@ -42,7 +42,7 @@ func wantsEventStream(c *gin.Context) bool {
 	return false
 }
 
-// streamEvent writes a single Server-Sent Event to the response writer.
+// streamEvent 向响应写入一条 SSE 事件。
 func streamEvent(w gin.ResponseWriter, flusher http.Flusher, event string, payload any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -58,22 +58,26 @@ func streamEvent(w gin.ResponseWriter, flusher http.Flusher, event string, paylo
 	return nil
 }
 
+// safeSSEWriter 为 SSE 输出提供并发安全保护。
 type safeSSEWriter struct {
 	writer  gin.ResponseWriter
 	flusher http.Flusher
 	mu      sync.Mutex
 }
 
+// newSafeSSEWriter 创建带锁的 SSE 写入器。
 func newSafeSSEWriter(w gin.ResponseWriter, flusher http.Flusher) *safeSSEWriter {
 	return &safeSSEWriter{writer: w, flusher: flusher}
 }
 
+// Send 发送单个事件并确保线程安全。
 func (w *safeSSEWriter) Send(event string, payload any) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return streamEvent(w.writer, w.flusher, event, payload)
 }
 
+// conversationContext 聚合会话执行所需的上下文数据。
 type conversationContext struct {
 	agent     agents.Agent
 	config    *agents.AgentChatConfig
@@ -84,6 +88,7 @@ type conversationContext struct {
 	knowledge []knowledge.ContextSnippet
 }
 
+// buildConversationContext 构建流式对话所需的上下文信息。
 func (m *Module) buildConversationContext(ctx context.Context, conv conversation) (*conversationContext, error) {
 	var agentModel agents.Agent
 	if err := m.db.WithContext(ctx).First(&agentModel, "id = ?", conv.AgentID).Error; err != nil {
@@ -166,6 +171,7 @@ func (m *Module) buildConversationContext(ctx context.Context, conv conversation
 	}, nil
 }
 
+// profilePrompt 生成注入系统提示的用户画像片段。
 func profilePrompt(profile *userProfile) string {
 	if profile == nil {
 		return ""
@@ -186,6 +192,7 @@ func profilePrompt(profile *userProfile) string {
 	return "User context:\n" + strings.Join(parts, "\n")
 }
 
+// formatPreferences 整理语音与回复偏好描述。
 func formatPreferences(prefs map[string]any) string {
 	if len(prefs) == 0 {
 		return ""
@@ -209,6 +216,7 @@ func formatPreferences(prefs map[string]any) string {
 	return builder.String()
 }
 
+// stringifyPreferenceValue 将偏好值转为字符串。
 func stringifyPreferenceValue(value any) string {
 	switch v := value.(type) {
 	case string:
@@ -243,6 +251,7 @@ func stringifyPreferenceValue(value any) string {
 	}
 }
 
+// messageToRecord 将数据库消息转换为流式记录。
 func messageToRecord(msg message, conv conversation) messageRecord {
 	return messageRecord{
 		ID:              msg.ID,
@@ -264,6 +273,7 @@ func messageToRecord(msg message, conv conversation) messageRecord {
 	}
 }
 
+// mergeExtras 合并消息扩展字段内容。
 func mergeExtras(existing datatypes.JSON, updates map[string]any) (datatypes.JSON, error) {
 	merged := make(map[string]any)
 	if len(existing) > 0 {
@@ -284,6 +294,7 @@ func mergeExtras(existing datatypes.JSON, updates map[string]any) (datatypes.JSO
 	return datatypes.JSON(raw), nil
 }
 
+// createAssistantPlaceholder 创建助手回复的占位消息。
 func (m *Module) createAssistantPlaceholder(ctx context.Context, conv conversation, parent message) (message, error) {
 	var created message
 	err := m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -316,6 +327,7 @@ func (m *Module) createAssistantPlaceholder(ctx context.Context, conv conversati
 	return created, err
 }
 
+// enqueueSpeechSynthesis 将语音合成任务加入队列。
 func (m *Module) enqueueSpeechSynthesis(msgID uint64, conv conversation, content string, selection voiceSelection, speed, pitch float64, emotion *emotionMetadata) {
 	if m.tts == nil || !m.tts.Enabled() {
 		return
@@ -413,6 +425,7 @@ func (m *Module) enqueueSpeechSynthesis(msgID uint64, conv conversation, content
 	}()
 }
 
+// handleCreateMessageStream 处理创建会话消息的流式接口。
 func (m *Module) handleCreateMessageStream(
 	c *gin.Context,
 	conv conversation,
@@ -1000,6 +1013,7 @@ func (m *Module) handleCreateMessageStream(
 	_ = writer.Send("done", gin.H{"id": placeholder.ID})
 }
 
+// mimeForAudioFormat 根据音频格式返回 MIME 类型。
 func mimeForAudioFormat(format string) string {
 	trimmed := strings.ToLower(strings.TrimSpace(format))
 	switch trimmed {

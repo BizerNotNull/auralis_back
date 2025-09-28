@@ -58,7 +58,7 @@ var (
 	sharedUserCache   *userCache
 )
 
-// Module wires together the JWT middleware and backing services.
+// Module 聚合鉴权相关的数据库、缓存、邮件等依赖。
 type Module struct {
 	db                 *gorm.DB
 	userStore          *UserStore
@@ -69,7 +69,7 @@ type Module struct {
 	adminRequestMailer *adminRequestMailer
 }
 
-// RegisterRoutes bootstraps the authentication endpoints under /auth.
+// RegisterRoutes 注册鉴权路由并初始化所有依赖。
 func RegisterRoutes(router *gin.Engine) (*Module, error) {
 	dsn := strings.TrimSpace(os.Getenv("DATABASE_DSN"))
 	if dsn == "" {
@@ -153,7 +153,7 @@ func RegisterRoutes(router *gin.Engine) (*Module, error) {
 // @Success 200 {object} map[string]interface{} "验证码信息"
 // @Failure 503 {object} map[string]string "服务不可用"
 // @Author bizer
-// @Router /auth/captcha [get]
+// handleCaptcha 生成并返回图片验证码。
 func (m *Module) handleCaptcha(c *gin.Context) {
 	if m == nil || m.captcha == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "captcha service unavailable"})
@@ -189,7 +189,7 @@ func (m *Module) handleCaptcha(c *gin.Context) {
 // @Failure 409 {object} map[string]string "资源冲突"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /auth/register [post]
+// handleRegister 处理用户注册请求并落库。
 func (m *Module) handleRegister(c *gin.Context) {
 	if m == nil || m.authService == nil || m.userStore == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "registration service unavailable"})
@@ -261,7 +261,7 @@ func (m *Module) handleRegister(c *gin.Context) {
 // @Failure 400 {object} map[string]string "请求参数错误"
 // @Failure 503 {object} map[string]string "服务不可用"
 // @Author bizer
-// @Router /auth/login [post]
+// handleLogin 响应用户登录并颁发 JWT。
 func (m *Module) handleLogin(c *gin.Context) {
 	if m == nil || m.jwtMiddleware == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "authentication service unavailable"})
@@ -301,7 +301,7 @@ func (m *Module) handleLogin(c *gin.Context) {
 // @Success 200 {object} map[string]interface{} "刷新结果"
 // @Failure 503 {object} map[string]string "服务不可用"
 // @Author bizer
-// @Router /auth/refresh [post]
+// handleRefresh 刷新 JWT 并更新用户信息缓存。
 func (m *Module) handleRefresh(c *gin.Context) {
 	if m == nil || m.jwtMiddleware == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "authentication service unavailable"})
@@ -321,7 +321,7 @@ func (m *Module) handleRefresh(c *gin.Context) {
 // @Failure 404 {object} map[string]string "未找到"
 // @Failure 503 {object} map[string]string "服务不可用"
 // @Author bizer
-// @Router /auth/profile [get]
+// handleProfile 返回当前登录用户的资料信息。
 func (m *Module) handleProfile(c *gin.Context) {
 	if m == nil || m.userStore == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "profile service unavailable"})
@@ -368,7 +368,7 @@ func (m *Module) handleProfile(c *gin.Context) {
 // @Failure 404 {object} map[string]string "未找到"
 // @Failure 503 {object} map[string]string "服务不可用"
 // @Author bizer
-// @Router /auth/profile [put]
+// handleUpdateProfile 更新用户资料及缓存信息。
 func (m *Module) handleUpdateProfile(c *gin.Context) {
 	if m == nil || m.userStore == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "profile service unavailable"})
@@ -439,7 +439,7 @@ func (m *Module) handleUpdateProfile(c *gin.Context) {
 // @Failure 401 {object} map[string]string "未授权"
 // @Failure 503 {object} map[string]string "服务不可用"
 // @Author bizer
-// @Router /auth/profile/avatar [post]
+// handleUploadAvatar 接收头像上传并返回签名地址。
 func (m *Module) handleUploadAvatar(c *gin.Context) {
 	if m == nil || m.userStore == nil || m.avatarStorage == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "avatar upload not configured"})
@@ -519,7 +519,7 @@ func (m *Module) handleUploadAvatar(c *gin.Context) {
 // @Failure 404 {object} map[string]string "未找到"
 // @Failure 503 {object} map[string]string "服务不可用"
 // @Author bizer
-// @Router /auth/tokens/purchase [post]
+// handlePurchaseTokens 处理用户代币购买请求并记账。
 func (m *Module) handlePurchaseTokens(c *gin.Context) {
 	if m == nil || m.userStore == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "token service unavailable"})
@@ -581,19 +581,21 @@ func (m *Module) handlePurchaseTokens(c *gin.Context) {
 	})
 }
 
+// setSharedUserCache 设置进程级共享的用户缓存实例。
 func setSharedUserCache(c *userCache) {
 	sharedUserCacheMu.Lock()
 	defer sharedUserCacheMu.Unlock()
 	sharedUserCache = c
 }
 
+// getSharedUserCache 获取当前共享的用户缓存实例。
 func getSharedUserCache() *userCache {
 	sharedUserCacheMu.RLock()
 	defer sharedUserCacheMu.RUnlock()
 	return sharedUserCache
 }
 
-// InvalidateUserCache clears cached user data so fresh values are loaded from the database.
+// InvalidateUserCache 根据用户 ID 清理相关缓存条目。
 func InvalidateUserCache(ctx context.Context, userID uint) {
 	if userID == 0 {
 		return
@@ -606,6 +608,7 @@ func InvalidateUserCache(ctx context.Context, userID uint) {
 	cache.invalidateRoles(ctx, userID)
 }
 
+// Middleware 返回配置好的 JWT Gin 中间件。
 func (m *Module) Middleware() gin.HandlerFunc {
 	if m == nil || m.jwtMiddleware == nil {
 		return nil
@@ -613,6 +616,7 @@ func (m *Module) Middleware() gin.HandlerFunc {
 	return m.jwtMiddleware.MiddlewareFunc()
 }
 
+// openDatabase 按驱动类型创建鉴权使用的数据库连接。
 func openDatabase(driver, dsn string) (*gorm.DB, error) {
 	switch strings.ToLower(driver) {
 	case "postgres", "postgresql", "pg":
@@ -626,6 +630,7 @@ func openDatabase(driver, dsn string) (*gorm.DB, error) {
 	}
 }
 
+// inferDriverFromDSN 根据 DSN 推断数据库驱动。
 func inferDriverFromDSN(dsn string) string {
 	lower := strings.ToLower(dsn)
 	switch {
@@ -640,6 +645,7 @@ func inferDriverFromDSN(dsn string) string {
 	}
 }
 
+// buildJWTMiddleware 构建鉴权所需的 JWT 中间件。
 func buildJWTMiddleware(service *AuthService, store *filestore.AvatarStorage) (*jwt.GinJWTMiddleware, error) {
 	secret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
 	if secret == "" {
@@ -766,7 +772,7 @@ func buildJWTMiddleware(service *AuthService, store *filestore.AvatarStorage) (*
 	})
 }
 
-// LoginRequest represents the expected payload for the login endpoint.
+// LoginRequest 描述登录接口需要的请求负载。
 type LoginRequest struct {
 	Username      string `json:"username" binding:"required"`
 	Password      string `json:"password" binding:"required"`
@@ -774,7 +780,7 @@ type LoginRequest struct {
 	CaptchaAnswer string `json:"captcha_answer" binding:"required"`
 }
 
-// RegisterRequest captures the payload for user registration.
+// RegisterRequest 描述用户注册请求的参数。
 type RegisterRequest struct {
 	Username      string  `json:"username" binding:"required"`
 	Password      string  `json:"password" binding:"required,min=6"`
@@ -787,7 +793,7 @@ type RegisterRequest struct {
 	Bio           *string `json:"bio"`
 }
 
-// UpdateProfileRequest captures profile update fields.
+// UpdateProfileRequest 列出可被更新的用户资料字段。
 type UpdateProfileRequest struct {
 	DisplayName *string `json:"display_name"`
 	Nickname    *string `json:"nickname"`
@@ -801,14 +807,14 @@ type purchaseTokensRequest struct {
 	Amount int64 `json:"amount"`
 }
 
-// AuthenticatedUser is the minimal identity stored inside JWT claims.
+// AuthenticatedUser 表示写入 JWT 声明的最小身份信息。
 type AuthenticatedUser struct {
 	ID       uint
 	Username string
 	Roles    []string
 }
 
-// AuthService handles authentication concerns.
+// AuthService 负责处理认证相关的业务逻辑。
 type AuthService struct {
 	users *UserStore
 }
@@ -919,6 +925,7 @@ type userCache struct {
 	client *redis.Client
 }
 
+// newUserCache 构造带超时控制的用户缓存封装。
 func newUserCache(client *redis.Client) *userCache {
 	if client == nil {
 		return nil
@@ -958,6 +965,7 @@ func (c *userCache) rolesKey(userID uint) string {
 	return fmt.Sprintf("auth:user:%d:roles", userID)
 }
 
+// getUserByID 从缓存或储存中获取指定用户信息。
 func (c *userCache) getUserByID(ctx context.Context, id uint) (*User, error) {
 	if c == nil || c.client == nil || id == 0 {
 		return nil, redis.Nil
@@ -975,6 +983,7 @@ func (c *userCache) getUserByID(ctx context.Context, id uint) (*User, error) {
 	return &user, nil
 }
 
+// getUserByUsername 按用户名获取用户缓存。
 func (c *userCache) getUserByUsername(ctx context.Context, username string) (*User, error) {
 	if c == nil || c.client == nil {
 		return nil, redis.Nil
@@ -996,6 +1005,7 @@ func (c *userCache) getUserByUsername(ctx context.Context, username string) (*Us
 	return &user, nil
 }
 
+// storeUser 将用户信息写入缓存。
 func (c *userCache) storeUser(ctx context.Context, user *User) {
 	if c == nil || c.client == nil || user == nil || user.ID == 0 {
 		return
@@ -1017,6 +1027,7 @@ func (c *userCache) storeUser(ctx context.Context, user *User) {
 	}
 }
 
+// invalidateUser 删除用户信息缓存。
 func (c *userCache) invalidateUser(ctx context.Context, userID uint, usernames ...string) {
 	if c == nil || c.client == nil || userID == 0 {
 		return
@@ -1040,6 +1051,7 @@ func (c *userCache) invalidateUser(ctx context.Context, userID uint, usernames .
 	}
 }
 
+// getRoles 读取用户的角色缓存。
 func (c *userCache) getRoles(ctx context.Context, userID uint) ([]string, error) {
 	if c == nil || c.client == nil || userID == 0 {
 		return nil, redis.Nil
@@ -1057,6 +1069,7 @@ func (c *userCache) getRoles(ctx context.Context, userID uint) ([]string, error)
 	return roles, nil
 }
 
+// storeRoles 写入用户角色缓存。
 func (c *userCache) storeRoles(ctx context.Context, userID uint, roles []string) {
 	if c == nil || c.client == nil || userID == 0 {
 		return
@@ -1073,6 +1086,7 @@ func (c *userCache) storeRoles(ctx context.Context, userID uint, roles []string)
 	}
 }
 
+// invalidateRoles 清除用户角色缓存。
 func (c *userCache) invalidateRoles(ctx context.Context, userID uint) {
 	if c == nil || c.client == nil || userID == 0 {
 		return
@@ -1093,7 +1107,7 @@ type UpdateProfileParams struct {
 	Bio         *string
 }
 
-// FindByID loads a user by primary key.
+// FindByID 按 ID 查询用户。
 func (s *UserStore) FindByID(ctx context.Context, id uint) (*User, error) {
 	if s == nil {
 		return nil, errors.New("authorization: user store not initialized")
@@ -1119,7 +1133,7 @@ func (s *UserStore) FindByID(ctx context.Context, id uint) (*User, error) {
 	return &user, nil
 }
 
-// FindByUsername loads a user by unique username.
+// FindByUsername 按用户名查询用户。
 func (s *UserStore) FindByUsername(ctx context.Context, username string) (*User, error) {
 	if s == nil {
 		return nil, errors.New("authorization: user store not initialized")
@@ -1146,7 +1160,7 @@ func (s *UserStore) FindByUsername(ctx context.Context, username string) (*User,
 	return &user, nil
 }
 
-// Create inserts a new user record.
+// Create 在数据库中新建用户记录。
 func (s *UserStore) Create(ctx context.Context, user *User) error {
 	if s == nil {
 		return errors.New("authorization: user store not initialized")
@@ -1164,7 +1178,7 @@ func (s *UserStore) Create(ctx context.Context, user *User) error {
 	return nil
 }
 
-// FindRoleNames returns the roles assigned to the given user.
+// FindRoleNames 查询用户拥有的角色名称。
 func (s *UserStore) FindRoleNames(ctx context.Context, userID uint) ([]string, error) {
 	if s == nil {
 		return nil, errors.New("authorization: user store not initialized")
@@ -1206,8 +1220,8 @@ func (s *UserStore) FindRoleNames(ctx context.Context, userID uint) ([]string, e
 	return normalized, nil
 }
 
-// GrantRoleByCode ensures that the given role is associated with the user.
-// It returns true when a new assignment is created and false if it already existed.
+// GrantRoleByCode 确保给定角色被授予给目标用户。
+// GrantRoleByCode 为用户授予指定角色。
 func (s *UserStore) GrantRoleByCode(ctx context.Context, userID uint, roleCode string) (bool, error) {
 	if s == nil {
 		return false, errors.New("authorization: user store not initialized")
@@ -1258,7 +1272,7 @@ func (s *UserStore) GrantRoleByCode(ctx context.Context, userID uint, roleCode s
 	return assigned, nil
 }
 
-// TokenBalance returns the current token balance for a user.
+// TokenBalance 查询用户当前代币余额。
 func (s *UserStore) TokenBalance(ctx context.Context, userID uint) (int64, error) {
 	if s == nil {
 		return 0, errors.New("authorization: user store not initialized")
@@ -1281,7 +1295,7 @@ func (s *UserStore) TokenBalance(ctx context.Context, userID uint) (int64, error
 	return result.TokenBalance, nil
 }
 
-// AddTokens increments a user token balance and returns the updated value.
+// AddTokens 为用户增加代币余额。
 func (s *UserStore) AddTokens(ctx context.Context, userID uint, amount int64) (int64, error) {
 	if s == nil {
 		return 0, errors.New("authorization: user store not initialized")
@@ -1306,7 +1320,7 @@ func (s *UserStore) AddTokens(ctx context.Context, userID uint, amount int64) (i
 	return s.TokenBalance(ctx, userID)
 }
 
-// UpdateProfile persists profile related fields for the given user id.
+// UpdateProfile 更新用户的公开资料信息。
 func (s *UserStore) UpdateProfile(ctx context.Context, userID uint, params UpdateProfileParams) (*User, error) {
 	if s == nil {
 		return nil, errors.New("authorization: user store not initialized")
@@ -1379,7 +1393,7 @@ func (s *UserStore) UpdateProfile(ctx context.Context, userID uint, params Updat
 	return s.FindByID(ctx, userID)
 }
 
-// User represents an application account.
+// User 表示系统中的账号实体。
 type User struct {
 	ID           uint    `gorm:"primaryKey"`
 	Username     string  `gorm:"uniqueIndex;size:64;not null"`
@@ -1396,7 +1410,7 @@ type User struct {
 	UpdatedAt    time.Time
 }
 
-// Role represents a collection of permissions assigned to users.
+// Role 表示可授予用户的一组权限。
 type Role struct {
 	ID        uint   `gorm:"primaryKey"`
 	Name      string `gorm:"uniqueIndex;size:64;not null"`
@@ -1405,7 +1419,7 @@ type Role struct {
 	UpdatedAt time.Time
 }
 
-// UserRole associates users with roles.
+// UserRole 记录用户与角色之间的关联。
 type UserRole struct {
 	ID        uint `gorm:"primaryKey"`
 	UserID    uint `gorm:"uniqueIndex:idx_user_role;not null"`
@@ -1413,6 +1427,7 @@ type UserRole struct {
 	CreatedAt time.Time
 }
 
+// extractUserID 从 JWT 声明中解析用户 ID。
 func extractUserID(claims jwt.MapClaims) uint {
 	if claims == nil {
 		return 0
@@ -1441,6 +1456,7 @@ func extractUserID(claims jwt.MapClaims) uint {
 	return 0
 }
 
+// extractRoles 从 JWT 声明中解析角色列表。
 func extractRoles(claims jwt.MapClaims) []string {
 	if claims == nil {
 		return []string{}
@@ -1462,6 +1478,7 @@ func extractRoles(claims jwt.MapClaims) []string {
 	}
 }
 
+// buildUserPayload 构造返回前端的用户信息载荷。
 func buildUserPayload(ctx context.Context, store *filestore.AvatarStorage, user *User, roles []string) gin.H {
 	if user == nil {
 		return gin.H{}
@@ -1508,6 +1525,7 @@ func buildUserPayload(ctx context.Context, store *filestore.AvatarStorage, user 
 		"roles":         roles,
 	}
 }
+// normalizeEmail 校验并标准化用户邮箱。
 func normalizeEmail(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -1522,6 +1540,7 @@ func normalizeEmail(raw string) (string, error) {
 	return strings.ToLower(parsed.Address), nil
 }
 
+// isDuplicateEmailError 判断数据库错误是否由邮箱重复导致。
 func isDuplicateEmailError(err error) bool {
 	if err == nil {
 		return false

@@ -21,12 +21,14 @@ const (
 	defaultMemorySummaryMax     = 800
 )
 
+// conversationMemory 负责管理会话记忆和摘要。
 type conversationMemory struct {
 	db     *gorm.DB
 	client *ChatClient
 	cfg    memoryConfig
 }
 
+// memoryConfig 保存记忆功能的参数配置。
 type memoryConfig struct {
 	recentLimit     int
 	summaryWindow   int
@@ -35,12 +37,14 @@ type memoryConfig struct {
 	summaryPrompt   string
 }
 
+// userProfile 存放用户偏好与概要信息。
 type userProfile struct {
 	Preferences map[string]any
 	Summary     string
 	LastTask    string
 }
 
+// newConversationMemory 基于数据库与聊天客户端构建记忆模块。
 func newConversationMemory(db *gorm.DB, client *ChatClient) *conversationMemory {
 	if db == nil {
 		return nil
@@ -76,6 +80,7 @@ func newConversationMemory(db *gorm.DB, client *ChatClient) *conversationMemory 
 	return &conversationMemory{db: db, client: client, cfg: cfg}
 }
 
+// readIntEnv 读取整数环境变量并返回默认值。
 func readIntEnv(key string, fallback int) int {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
@@ -88,6 +93,7 @@ func readIntEnv(key string, fallback int) int {
 	return value
 }
 
+// recentMessageLimit 返回需要保留的近期消息数量。
 func (m *conversationMemory) recentMessageLimit() int {
 	if m == nil || m.cfg.recentLimit <= 0 {
 		return defaultMemoryRecentLimit
@@ -95,6 +101,7 @@ func (m *conversationMemory) recentMessageLimit() int {
 	return m.cfg.recentLimit
 }
 
+// loadUserProfile 加载用户在某个智能体下的记忆。
 func (m *conversationMemory) loadUserProfile(ctx context.Context, agentID, userID uint64) (*userProfile, error) {
 	if m == nil || agentID == 0 || userID == 0 {
 		return &userProfile{Preferences: map[string]any{}}, nil
@@ -128,6 +135,7 @@ func (m *conversationMemory) loadUserProfile(ctx context.Context, agentID, userI
 	return profile, nil
 }
 
+// upsertSpeechPreferences 保存或更新用户的语音偏好。
 func (m *conversationMemory) upsertSpeechPreferences(ctx context.Context, agentID, userID uint64, prefs speechPreferences) error {
 	if m == nil || agentID == 0 || userID == 0 {
 		return nil
@@ -189,6 +197,7 @@ func (m *conversationMemory) upsertSpeechPreferences(ctx context.Context, agentI
 	}).Create(&upsert).Error
 }
 
+// ensureSummary 在满足条件时生成会话摘要。
 func (m *conversationMemory) ensureSummary(ctx context.Context, conv conversation) (string, error) {
 	if m == nil || m.cfg.summaryTrigger <= 0 {
 		return "", nil
@@ -251,6 +260,7 @@ func (m *conversationMemory) ensureSummary(ctx context.Context, conv conversatio
 	return summary, nil
 }
 
+// generateSummary 调用大模型生成会话摘要。
 func (m *conversationMemory) generateSummary(ctx context.Context, conv conversation, history []message) (string, error) {
 	transcript := buildTranscript(conv, history)
 
@@ -270,6 +280,7 @@ func (m *conversationMemory) generateSummary(ctx context.Context, conv conversat
 	return result.Content, nil
 }
 
+// buildTranscript 将历史消息拼接为摘要输入文本。
 func buildTranscript(conv conversation, history []message) string {
 	var builder strings.Builder
 	if conv.Summary != nil {
@@ -295,6 +306,7 @@ func buildTranscript(conv conversation, history []message) string {
 	return builder.String()
 }
 
+// fallbackSummary 在模型不可用时生成后备摘要。
 func fallbackSummary(transcript string) string {
 	transcript = strings.TrimSpace(transcript)
 	if transcript == "" {

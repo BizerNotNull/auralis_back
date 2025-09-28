@@ -22,10 +22,12 @@ const (
 	archiveFormatRar       = "rar"
 )
 
+// assetStorage 负责管理 Live2D 资源的磁盘存储。
 type assetStorage struct {
 	baseDir string
 }
 
+// newAssetStorageFromEnv 根据环境变量构建资源存储目录。
 func newAssetStorageFromEnv() (*assetStorage, error) {
 	dir := strings.TrimSpace(os.Getenv("LIVE2D_STORAGE_DIR"))
 	if dir == "" {
@@ -41,6 +43,7 @@ func newAssetStorageFromEnv() (*assetStorage, error) {
 	return &assetStorage{baseDir: abs}, nil
 }
 
+// BaseDir 返回资源存储的根目录。
 func (s *assetStorage) BaseDir() string {
 	if s == nil {
 		return ""
@@ -48,6 +51,7 @@ func (s *assetStorage) BaseDir() string {
 	return s.baseDir
 }
 
+// SaveArchive 保存模型压缩包并提取核心文件。
 func (s *assetStorage) SaveArchive(fileHeader *multipart.FileHeader, entryHint, previewHint string) (folder string, entryFile string, previewFile *string, err error) {
 	if s == nil {
 		return "", "", nil, errors.New("live2d: asset storage not configured")
@@ -132,6 +136,7 @@ func (s *assetStorage) SaveArchive(fileHeader *multipart.FileHeader, entryHint, 
 	return folder, entryFile, previewFile, nil
 }
 
+// extractZip 解压 ZIP 格式并定位入口文件。
 func (s *assetStorage) extractZip(tmpFile *os.File, size int64, destDir string, state *archiveExtractionState) (string, *string, error) {
 	reader, err := zip.NewReader(tmpFile, size)
 	if err != nil {
@@ -197,6 +202,7 @@ func (s *assetStorage) extractZip(tmpFile *os.File, size int64, destDir string, 
 	return state.resolve()
 }
 
+// extractRar 解压 RAR 格式资源。
 func (s *assetStorage) extractRar(tmpPath string, destDir string, state *archiveExtractionState) (string, *string, error) {
 	f, err := os.Open(tmpPath)
 	if err != nil {
@@ -273,6 +279,7 @@ func (s *assetStorage) extractRar(tmpPath string, destDir string, state *archive
 	return state.resolve()
 }
 
+// Remove 删除指定存储目录。
 func (s *assetStorage) Remove(folder string) error {
 	if s == nil {
 		return nil
@@ -288,6 +295,7 @@ func (s *assetStorage) Remove(folder string) error {
 	return os.RemoveAll(target)
 }
 
+// detectArchiveFormat 检测压缩包格式类型。
 func detectArchiveFormat(file *os.File, originalName string) (string, error) {
 	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(originalName)))
 	switch ext {
@@ -324,6 +332,7 @@ func detectArchiveFormat(file *os.File, originalName string) (string, error) {
 	return "", errors.New("live2d: unsupported archive format, only .zip and .rar are accepted")
 }
 
+// sanitizeArchiveEntry 清洗压缩包中的文件路径。
 func sanitizeArchiveEntry(name string) (string, error) {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
@@ -345,6 +354,7 @@ func sanitizeArchiveEntry(name string) (string, error) {
 	return normalized, nil
 }
 
+// normalizeArchivePath 规范化压缩包路径字符串。
 func normalizeArchivePath(value string) string {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -359,6 +369,7 @@ func normalizeArchivePath(value string) string {
 	return normalized
 }
 
+// isImagePath 判断路径是否指向图片资源。
 func isImagePath(path string) bool {
 	switch {
 	case strings.HasSuffix(path, ".png"):
@@ -374,6 +385,7 @@ func isImagePath(path string) bool {
 	}
 }
 
+// archiveExtractionState 跟踪压缩包中模型与预览文件的发现情况。
 type archiveExtractionState struct {
 	entryHint        string
 	previewHint      string
@@ -383,6 +395,7 @@ type archiveExtractionState struct {
 	previewCandidate string
 }
 
+// newArchiveExtractionState 创建提取状态管理器。
 func newArchiveExtractionState(entryHint, previewHint string) *archiveExtractionState {
 	return &archiveExtractionState{
 		entryHint:   entryHint,
@@ -390,6 +403,7 @@ func newArchiveExtractionState(entryHint, previewHint string) *archiveExtraction
 	}
 }
 
+// observe 记录压缩包遍历过程中的候选文件。
 func (s *archiveExtractionState) observe(relPath string) {
 	if relPath == "" {
 		return
@@ -411,6 +425,7 @@ func (s *archiveExtractionState) observe(relPath string) {
 	}
 }
 
+// resolve 根据记录结果输出入口与预览文件。
 func (s *archiveExtractionState) resolve() (string, *string, error) {
 	var entry string
 	switch {
