@@ -2,7 +2,7 @@ package live2d
 
 import "time"
 
-// Live2DModel represents a registered Live2D asset that can be rendered on the client.
+// Live2DModel 表示可供前端渲染的 Live2D 资源。
 type Live2DModel struct {
 	ID          uint64    `gorm:"primaryKey" json:"id"`
 	Key         string    `gorm:"size:64;uniqueIndex" json:"key"`
@@ -16,6 +16,7 @@ type Live2DModel struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// TableName 指定 Live2DModel 的数据库表名。
 func (Live2DModel) TableName() string {
 	return "live2d_models"
 }

@@ -18,11 +18,13 @@ import (
 	"gorm.io/gorm"
 )
 
+// Module 管理 Live2D 模型的数据库与存储操作。
 type Module struct {
 	db      *gorm.DB
 	storage *assetStorage
 }
 
+// createModelForm 描述上传或引用模型时的表单字段。
 type createModelForm struct {
 	Name               string `form:"name" binding:"required"`
 	Description        string `form:"description"`
@@ -32,6 +34,7 @@ type createModelForm struct {
 	ExternalPreviewURL string `form:"external_preview_url"`
 }
 
+// modelDTO 为接口响应准备的模型数据结构。
 type modelDTO struct {
 	ID          uint64  `json:"id"`
 	Key         string  `json:"key"`
@@ -44,6 +47,7 @@ type modelDTO struct {
 	UpdatedAt   int64   `json:"updated_at"`
 }
 
+// RegisterRoutes 注册 Live2D 模型相关路由。
 func RegisterRoutes(router *gin.Engine, guard *authorization.Guard) (*Module, error) {
 	db, err := openDatabaseFromEnv()
 	if err != nil {
@@ -88,7 +92,7 @@ func RegisterRoutes(router *gin.Engine, guard *authorization.Guard) (*Module, er
 // @Success 200 {object} map[string]interface{} "模型列表"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /live2d/models [get]
+// handleListModels 返回系统中已注册的模型列表。
 func (m *Module) handleListModels(c *gin.Context) {
 	var models []Live2DModel
 	if err := m.db.Order("created_at desc").Find(&models).Error; err != nil {
@@ -115,7 +119,7 @@ func (m *Module) handleListModels(c *gin.Context) {
 // @Failure 400 {object} map[string]string "请求参数错误"
 // @Failure 404 {object} map[string]string "未找到"
 // @Author bizer
-// @Router /live2d/models/{id} [get]
+// handleGetModel 根据 ID 查询模型详情。
 func (m *Module) handleGetModel(c *gin.Context) {
 	model, err := m.fetchModelByParam(c.Param("id"))
 	if err != nil {
@@ -145,7 +149,7 @@ func (m *Module) handleGetModel(c *gin.Context) {
 // @Failure 400 {object} map[string]string "请求参数错误"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /live2d/models [post]
+// handleCreateModel 创建新的 Live2D 模型记录。
 func (m *Module) handleCreateModel(c *gin.Context) {
 	var form createModelForm
 	if err := c.ShouldBind(&form); err != nil {
@@ -260,7 +264,7 @@ func (m *Module) handleCreateModel(c *gin.Context) {
 // @Failure 409 {object} map[string]string "资源冲突"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /live2d/models/{id} [delete]
+// handleDeleteModel 删除模型及关联资源。
 func (m *Module) handleDeleteModel(c *gin.Context) {
 	model, err := m.fetchModelByParam(c.Param("id"))
 	if err != nil {
@@ -312,7 +316,7 @@ func (m *Module) handleDeleteModel(c *gin.Context) {
 // @Success 200 {file} binary "模型资源文件"
 // @Failure 404 {object} map[string]string "未找到"
 // @Author bizer
-// @Router /live2d/models/{id}/files/{filepath} [get]
+// handleServeFile 提供模型资源文件的下载。
 func (m *Module) handleServeFile(c *gin.Context) {
 	model, err := m.fetchModelByParam(c.Param("id"))
 	if err != nil {
@@ -350,6 +354,7 @@ func (m *Module) handleServeFile(c *gin.Context) {
 	c.File(target)
 }
 
+// fetchModelByParam 按路径参数加载模型记录。
 func (m *Module) fetchModelByParam(param string) (*Live2DModel, error) {
 	trimmed := strings.TrimSpace(param)
 	if trimmed == "" {
@@ -370,6 +375,7 @@ func (m *Module) fetchModelByParam(param string) (*Live2DModel, error) {
 	return &model, nil
 }
 
+// toDTO 将模型实体转换为响应结构。
 func (m *Module) toDTO(model *Live2DModel) modelDTO {
 	dto := modelDTO{
 		ID:          model.ID,
@@ -389,6 +395,7 @@ func (m *Module) toDTO(model *Live2DModel) modelDTO {
 	return dto
 }
 
+// entryURL 构造模型入口文件的访问路径。
 func (m *Module) entryURL(model *Live2DModel) string {
 	if model.StorageType == "external" {
 		return strings.TrimSpace(model.EntryFile)
@@ -399,6 +406,7 @@ func (m *Module) entryURL(model *Live2DModel) string {
 	return strings.TrimSpace(model.EntryFile)
 }
 
+// previewURL 构造模型预览图的访问路径。
 func (m *Module) previewURL(model *Live2DModel) string {
 	if model.PreviewFile == nil {
 		return ""
@@ -412,6 +420,7 @@ func (m *Module) previewURL(model *Live2DModel) string {
 	return strings.TrimSpace(*model.PreviewFile)
 }
 
+// generateKey 基于名称生成唯一的模型标识。
 func (m *Module) generateKey(name string) (string, error) {
 	base := slugify(name)
 	if base == "" {
@@ -431,6 +440,7 @@ func (m *Module) generateKey(name string) (string, error) {
 	return fmt.Sprintf("%s-%s", base, uuidChunk()), nil
 }
 
+// slugify 将字符串转换为 URL 友好的短标识。
 func slugify(value string) string {
 	var b strings.Builder
 	b.Grow(len(value))
@@ -451,6 +461,7 @@ func slugify(value string) string {
 	return result
 }
 
+// uuidChunk 生成用于标识的短 UUID 片段。
 func uuidChunk() string {
 	id := uuid.NewString()
 	if len(id) > 8 {
@@ -459,6 +470,7 @@ func uuidChunk() string {
 	return id
 }
 
+// buildFileURL 拼接模型文件的对外 URL。
 func buildFileURL(id uint64, relative string) string {
 	trimmed := strings.TrimPrefix(strings.TrimSpace(relative), "/")
 	if trimmed == "" {
@@ -471,6 +483,7 @@ func buildFileURL(id uint64, relative string) string {
 	return fmt.Sprintf("/live2d/models/%d/files/%s", id, strings.Join(parts, "/"))
 }
 
+// isValidURL 校验提供的 URL 是否可接受。
 func isValidURL(raw string) bool {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {

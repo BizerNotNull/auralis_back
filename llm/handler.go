@@ -21,6 +21,7 @@ import (
 	"gorm.io/gorm"
 )
 
+// allowedMessageRoles 定义允许的消息角色集合。
 var allowedMessageRoles = map[string]struct{}{
 	"system":    {},
 	"user":      {},
@@ -28,6 +29,7 @@ var allowedMessageRoles = map[string]struct{}{
 	"tool":      {},
 }
 
+// Module 聚合聊天、存储、语音与记忆等依赖。
 type Module struct {
 	client       *ChatClient
 	db           *gorm.DB
@@ -38,7 +40,7 @@ type Module struct {
 	knowledge    *knowledge.Service
 }
 
-// RegisterRoutes mounts the LLM testing endpoint under /llm.
+// RegisterRoutes 注册 LLM 相关的路由与依赖。
 func RegisterRoutes(router *gin.Engine, synthesizer tts.Synthesizer, knowledgeSvc *knowledge.Service) (*Module, error) {
 	client, err := NewChatClientFromEnv()
 	if err != nil {
@@ -90,7 +92,7 @@ func RegisterRoutes(router *gin.Engine, synthesizer tts.Synthesizer, knowledgeSv
 // @Param provider query string false "按提供方过滤"
 // @Success 200 {object} map[string]interface{} "模型列表"
 // @Author bizer
-// @Router /llm/models [get]
+// handleListModels 返回可用的聊天模型列表。
 func (m *Module) handleListModels(c *gin.Context) {
 	catalog := m.modelCatalog
 	if len(catalog) == 0 {
@@ -110,10 +112,12 @@ func (m *Module) handleListModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"models": result})
 }
 
+// completeRequest 表示补全接口的请求参数。
 type completeRequest struct {
 	Prompt string `json:"prompt" binding:"required"`
 }
 
+// completeResponse 表示补全接口的响应内容。
 type completeResponse struct {
 	Prompt  string     `json:"prompt"`
 	Content string     `json:"content"`
@@ -131,7 +135,7 @@ type completeResponse struct {
 // @Failure 400 {object} map[string]string "请求参数错误"
 // @Failure 502 {object} map[string]string "上游服务错误"
 // @Author bizer
-// @Router /llm/complete [post]
+// handleComplete 使用默认模型执行一次性文本补全。
 func (m *Module) handleComplete(c *gin.Context) {
 	var req completeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -182,7 +186,7 @@ type messageRecord struct {
 // @Failure 400 {object} map[string]string "请求参数错误"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /llm/messages [get]
+// handleRecentMessages 返回会话的近期消息记录。
 func (m *Module) handleRecentMessages(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -251,6 +255,7 @@ func (m *Module) handleRecentMessages(c *gin.Context) {
 	})
 }
 
+// invalidateRecentMessagesCache 清除近期消息缓存。
 func (m *Module) invalidateRecentMessagesCache(ctx context.Context, agentID, userID uint64) {
 	if m == nil || m.messageCache == nil {
 		return
@@ -267,6 +272,7 @@ type messageSpeechRecord struct {
 	Extras         map[string]any
 }
 
+// normalizeString 去除字符串空白并转换为小写。
 func normalizeString(value any) string {
 	switch v := value.(type) {
 	case string:
@@ -282,6 +288,7 @@ func normalizeString(value any) string {
 	}
 }
 
+// loadMessageSpeechRecord 加载消息的语音合成记录。
 func (m *Module) loadMessageSpeechRecord(ctx context.Context, messageID, agentID, userID uint64) (*messageSpeechRecord, error) {
 	var row struct {
 		ID             uint64
@@ -314,6 +321,7 @@ func (m *Module) loadMessageSpeechRecord(ctx context.Context, messageID, agentID
 	}, nil
 }
 
+// ensureSpeechAudioURL 为语音消息生成可访问的音频链接。
 func (m *Module) ensureSpeechAudioURL(speech map[string]any) map[string]any {
 	if speech == nil {
 		return nil
@@ -346,7 +354,7 @@ func (m *Module) ensureSpeechAudioURL(speech map[string]any) map[string]any {
 // @Failure 404 {object} map[string]string "未找到"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /llm/messages/{id}/speech [get]
+// handleMessageSpeech 返回消息的语音合成元信息。
 func (m *Module) handleMessageSpeech(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -435,7 +443,7 @@ func (m *Module) handleMessageSpeech(c *gin.Context) {
 // @Param id path int true "消息ID"
 // @Failure 404 {object} map[string]string "功能未启用"
 // @Author bizer
-// @Router /llm/messages/{id}/speech/audio [get]
+// handleMessageSpeech 返回消息的语音合成元信息。
 func (m *Module) handleMessageSpeechAudio(c *gin.Context) {
 	c.JSON(http.StatusNotFound, gin.H{"error": "speech streaming disabled"})
 }
@@ -497,7 +505,7 @@ type createMessageResponse struct {
 // @Failure 404 {object} map[string]string "未找到"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /llm/messages [post]
+// handleCreateMessage 创建消息并触发回复生成。
 func (m *Module) handleCreateMessage(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -724,6 +732,7 @@ func (m *Module) handleCreateMessage(c *gin.Context) {
 	c.JSON(http.StatusCreated, response)
 }
 
+// parsePositiveUint 将字符串解析为正整数。
 func parsePositiveUint(value, field string) (uint64, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -738,6 +747,7 @@ func parsePositiveUint(value, field string) (uint64, error) {
 	return id, nil
 }
 
+// generateAssistantReply 调用大模型生成助手回复。
 func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, userMsg message, prefs speechPreferences) (*messageRecord, *ChatUsage, error) {
 	if m.client == nil {
 		return nil, nil, errors.New("llm client not configured")
@@ -747,6 +757,7 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 	if err != nil {
 		return nil, nil, err
 	}
+	modelName := contextData.modelName()
 
 	var knowledgeSnippets []knowledge.ContextSnippet
 	if snippets, kErr := m.attachKnowledgeContext(ctx, contextData, conv.AgentID, userMsg.Content); kErr != nil {
@@ -758,7 +769,7 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 	applyPreferenceDefaults(&prefs, contextData)
 
 	start := time.Now()
-	result, err := m.client.Chat(ctx, contextData.messages)
+	result, err := m.client.Chat(ctx, contextData.messages, modelName)
 	if err != nil {
 		short := truncateString(err.Error(), 256)
 		_ = m.db.WithContext(ctx).Model(&message{}).Where("id = ?", userMsg.ID).Updates(map[string]any{
@@ -862,7 +873,7 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 	}
 
 	if m.memory != nil {
-		if summary, err := m.memory.ensureSummary(ctx, conv); err != nil {
+		if summary, err := m.memory.ensureSummary(ctx, conv, modelName); err != nil {
 			log.Printf("llm: update conversation summary: %v", err)
 		} else if summary != "" {
 			conv.Summary = &summary
@@ -872,6 +883,7 @@ func (m *Module) generateAssistantReply(ctx context.Context, conv conversation, 
 	return &record, usage, nil
 }
 
+// buildSystemPrompt 构建系统提示词。
 func buildSystemPrompt(agent *agents.Agent, cfg *agents.AgentChatConfig) string {
 	if agent == nil {
 		return "You are a helpful assistant."
@@ -904,6 +916,7 @@ func buildSystemPrompt(agent *agents.Agent, cfg *agents.AgentChatConfig) string 
 	return strings.Join(parts, "\n\n")
 }
 
+// applyPreferenceDefaults 合并用户与默认偏好设置。
 func applyPreferenceDefaults(prefs *speechPreferences, ctxData *conversationContext) {
 	if prefs == nil || ctxData == nil {
 		return
@@ -950,6 +963,7 @@ func applyPreferenceDefaults(prefs *speechPreferences, ctxData *conversationCont
 	}
 }
 
+// getPreferenceString 从偏好中读取字符串值。
 func getPreferenceString(prefs map[string]any, key string) string {
 	if prefs == nil {
 		return ""
@@ -970,6 +984,7 @@ func getPreferenceString(prefs map[string]any, key string) string {
 	}
 }
 
+// getPreferenceFloat 从偏好中读取浮点值。
 func getPreferenceFloat(prefs map[string]any, key string) (float64, bool) {
 	if prefs == nil {
 		return 0, false
@@ -1022,6 +1037,7 @@ func getPreferenceFloat(prefs map[string]any, key string) (float64, bool) {
 	return 0, false
 }
 
+// truncateString 按字符数截断字符串并追加省略符。
 func truncateString(value string, max int) string {
 	if max <= 0 {
 		return ""
@@ -1035,6 +1051,7 @@ func truncateString(value string, max int) string {
 	return value[:max-3] + "..."
 }
 
+// toRawMessage 将消息记录转换为聊天请求格式。
 func toRawMessage(data datatypes.JSON) json.RawMessage {
 	if len(data) == 0 {
 		return nil
@@ -1079,6 +1096,7 @@ func resolveVoiceSelection(candidateID string, candidateProvider string, synth t
 	return selection
 }
 
+// providerForVoiceOption 推断语音供应商标识。
 func providerForVoiceOption(options []tts.VoiceOption, id string) string {
 	trimmed := strings.TrimSpace(id)
 	if trimmed == "" {
@@ -1092,6 +1110,7 @@ func providerForVoiceOption(options []tts.VoiceOption, id string) string {
 	return ""
 }
 
+// normalizeVoiceProvider 规范化语音供应商名称。
 func normalizeVoiceProvider(value string) string {
 	trimmed := strings.ToLower(strings.TrimSpace(value))
 	switch trimmed {
@@ -1104,6 +1123,7 @@ func normalizeVoiceProvider(value string) string {
 	}
 }
 
+// sanitizeSpeed 将语速值限制在合理区间。
 func sanitizeSpeed(value float64) float64 {
 	if value <= 0 {
 		return 1.0
@@ -1117,6 +1137,7 @@ func sanitizeSpeed(value float64) float64 {
 	return value
 }
 
+// sanitizePitch 将音调值限制在合理区间。
 func sanitizePitch(value float64) float64 {
 	if value <= 0 {
 		return 1.0
@@ -1130,6 +1151,7 @@ func sanitizePitch(value float64) float64 {
 	return value
 }
 
+// clampFloat 将浮点数限制在指定范围内。
 func clampFloat(value, min, max float64) float64 {
 	if value < min {
 		return min
@@ -1140,6 +1162,7 @@ func clampFloat(value, min, max float64) float64 {
 	return value
 }
 
+// normalizeEmotionLabel 规范化情绪标签名称。
 func normalizeEmotionLabel(value string) string {
 	trimmed := strings.TrimSpace(strings.ToLower(value))
 	switch trimmed {
@@ -1162,6 +1185,7 @@ func normalizeEmotionLabel(value string) string {
 	}
 }
 
+// motionForEmotion 根据情绪映射 Live2D 动作。
 func motionForEmotion(label string, intensity float64) string {
 	switch label {
 	case "happy":
@@ -1193,6 +1217,7 @@ func motionForEmotion(label string, intensity float64) string {
 	}
 }
 
+// inferEmotion 根据内容推测情绪表现。
 func inferEmotion(text, hint string) *emotionMetadata {
 	trimmed := strings.TrimSpace(text)
 	normalizedHint := normalizeEmotionLabel(hint)
@@ -1274,6 +1299,7 @@ const (
 	knowledgePromptCharLimit = 480
 )
 
+// attachKnowledgeContext 将知识片段注入对话上下文。
 func (m *Module) attachKnowledgeContext(ctx context.Context, ctxData *conversationContext, agentID uint64, query string) ([]knowledge.ContextSnippet, error) {
 	if m == nil || m.knowledge == nil || ctxData == nil {
 		return nil, nil
@@ -1297,6 +1323,7 @@ func (m *Module) attachKnowledgeContext(ctx context.Context, ctxData *conversati
 	return snippets, nil
 }
 
+// buildKnowledgePrompt 生成带引用信息的知识提示。
 func buildKnowledgePrompt(snippets []knowledge.ContextSnippet) string {
 	var builder strings.Builder
 	builder.WriteString("Agent knowledge references (cite as [Ref#] when used):\n")
@@ -1328,6 +1355,7 @@ func buildKnowledgePrompt(snippets []knowledge.ContextSnippet) string {
 	return builder.String()
 }
 
+// snippetsToExtras 将知识片段转换为消息扩展字段。
 func snippetsToExtras(snippets []knowledge.ContextSnippet) []map[string]any {
 	if len(snippets) == 0 {
 		return nil
@@ -1356,6 +1384,7 @@ func snippetsToExtras(snippets []knowledge.ContextSnippet) []map[string]any {
 	return result
 }
 
+// truncateForPrompt 为提示裁剪文本长度。
 func truncateForPrompt(text string, max int) string {
 	trimmed := strings.TrimSpace(text)
 	if max <= 0 || trimmed == "" {

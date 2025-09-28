@@ -6,6 +6,7 @@ import (
 	"gorm.io/datatypes"
 )
 
+// Document 描述知识库中的原始文档。
 type Document struct {
 	ID        uint64         `gorm:"primaryKey" json:"id"`
 	AgentID   uint64         `gorm:"not null;index:idx_agent_document" json:"agent_id"`
@@ -21,10 +22,12 @@ type Document struct {
 	UpdatedAt time.Time      `json:"updated_at"`
 }
 
+// TableName 指定 Document 对应的数据库表名。
 func (Document) TableName() string {
 	return "agent_knowledge_documents"
 }
 
+// Chunk 存储文档分片及其向量信息。
 type Chunk struct {
 	ID         uint64    `gorm:"primaryKey" json:"id"`
 	DocumentID uint64    `gorm:"not null;index:idx_document_seq" json:"document_id"`
@@ -37,10 +40,12 @@ type Chunk struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+// TableName 指定 Chunk 使用的数据库表。
 func (Chunk) TableName() string {
 	return "agent_knowledge_chunks"
 }
 
+// ChunkWithScore 结合召回分数与文档切片。
 type ChunkWithScore struct {
 	Chunk
 	Score float64 `json:"score"`

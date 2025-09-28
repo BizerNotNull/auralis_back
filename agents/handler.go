@@ -25,6 +25,7 @@ import (
 	"gorm.io/gorm"
 )
 
+// Module 聚合了智能体相关的数据库、存储和知识库依赖。
 type Module struct {
 	db            *gorm.DB
 	avatars       *filestore.AvatarStorage
@@ -51,6 +52,7 @@ const (
 	maxListLimit           = 100
 )
 
+// applyAvatarURL 对头像地址做清理并生成带时效的签名 URL。
 func (m *Module) applyAvatarURL(ctx context.Context, agent *Agent) {
 	if m == nil || agent == nil || agent.AvatarURL == nil {
 		return
@@ -77,6 +79,7 @@ func (m *Module) applyAvatarURL(ctx context.Context, agent *Agent) {
 	*agent.AvatarURL = signed
 }
 
+// parseEnvBool 读取布尔环境变量并返回解析结果。
 func parseEnvBool(key string) (bool, error) {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
@@ -89,6 +92,7 @@ func parseEnvBool(key string) (bool, error) {
 	return value, nil
 }
 
+// reviewRequired 判断智能体是否需要审核流程。
 func (m *Module) reviewRequired() bool {
 	if m == nil {
 		return false
@@ -104,6 +108,7 @@ func (m *Module) reviewRequired() bool {
 	return value
 }
 
+// RegisterRoutes 初始化智能体模块并注册所有相关路由。
 func RegisterRoutes(router *gin.Engine, guard *authorization.Guard) (*Module, error) {
 	db, err := openDatabaseFromEnv()
 	if err != nil {
@@ -250,7 +255,7 @@ type knowledgeDocumentUpdateRequest struct {
 // @Failure 401 {object} map[string]string "未授权"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /agents [post]
+// handleCreateAgent 处理创建智能体的请求并落库。
 func (m *Module) handleCreateAgent(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -426,7 +431,7 @@ func (m *Module) handleCreateAgent(c *gin.Context) {
 // @Failure 404 {object} map[string]string "未找到"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /agents/{id} [put]
+// handleUpdateAgent 处理智能体信息的更新操作。
 func (m *Module) handleUpdateAgent(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -766,7 +771,7 @@ func (m *Module) handleUpdateAgent(c *gin.Context) {
 // @Failure 400 {object} map[string]string "请求参数错误"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /agents [get]
+// handleListAgents 返回对外展示的智能体列表。
 func (m *Module) handleListAgents(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -840,6 +845,7 @@ func (m *Module) handleListAgents(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"agents": agents})
 }
 
+// parsePositiveLimit 解析列表请求中的 limit 参数。
 func parsePositiveLimit(raw string) (int, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -858,6 +864,7 @@ func parsePositiveLimit(raw string) (int, error) {
 	return value, nil
 }
 
+// normalizeSortDirection 规范化排序方向字符串。
 func normalizeSortDirection(raw string) string {
 	value := strings.ToLower(strings.TrimSpace(raw))
 	switch value {
@@ -868,6 +875,7 @@ func normalizeSortDirection(raw string) string {
 	}
 }
 
+// normalizeAgentSortOrder 校验并返回智能体列表的排序字段。
 func normalizeAgentSortOrder(raw string) (string, bool) {
 	value := strings.ToLower(strings.TrimSpace(raw))
 	if value == "" {
@@ -890,6 +898,7 @@ func normalizeAgentSortOrder(raw string) (string, bool) {
 	}
 }
 
+// sortAgents 按指定字段和方向对智能体集合排序。
 func sortAgents(list []Agent, order, direction string) {
 	if len(list) <= 1 {
 		return
@@ -977,6 +986,7 @@ func sortAgents(list []Agent, order, direction string) {
 	})
 }
 
+// computeAgentHotScore 根据浏览量和评分计算热度值。
 func computeAgentHotScore(agent Agent) float64 {
 	viewComponent := math.Log(float64(agent.ViewCount)+1) * 4
 	ratingComponent := agent.AverageRating * (float64(agent.RatingCount) + 1)
@@ -1001,7 +1011,7 @@ func computeAgentHotScore(agent Agent) float64 {
 // @Failure 401 {object} map[string]string "未授权"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /agents/mine [get]
+// handleListMyAgents 获取当前用户创建的智能体列表。
 func (m *Module) handleListMyAgents(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -1064,7 +1074,7 @@ func (m *Module) handleListMyAgents(c *gin.Context) {
 // @Failure 401 {object} map[string]string
 // @Failure 403 {object} map[string]string
 // @Failure 404 {object} map[string]string
-// @Failure 500 {object} map[string]string
+// handleListKnowledgeDocuments 列出智能体关联的知识库文档。
 func (m *Module) handleListKnowledgeDocuments(c *gin.Context) {
 	if m == nil || m.knowledge == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge service not available"})
@@ -1118,7 +1128,7 @@ func (m *Module) handleListKnowledgeDocuments(c *gin.Context) {
 // @Failure 401 {object} map[string]string
 // @Failure 403 {object} map[string]string
 // @Failure 404 {object} map[string]string
-// @Failure 500 {object} map[string]string
+// handleGetKnowledgeDocument 获取单个知识库文档详情。
 func (m *Module) handleGetKnowledgeDocument(c *gin.Context) {
 	if m == nil || m.knowledge == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge service not available"})
@@ -1182,7 +1192,7 @@ func (m *Module) handleGetKnowledgeDocument(c *gin.Context) {
 // @Failure 401 {object} map[string]string
 // @Failure 403 {object} map[string]string
 // @Failure 404 {object} map[string]string
-// @Failure 500 {object} map[string]string
+// handleCreateKnowledgeDocument 新建智能体的知识库文档。
 func (m *Module) handleCreateKnowledgeDocument(c *gin.Context) {
 	if m == nil || m.knowledge == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge service not available"})
@@ -1258,7 +1268,7 @@ func (m *Module) handleCreateKnowledgeDocument(c *gin.Context) {
 // @Failure 401 {object} map[string]string
 // @Failure 403 {object} map[string]string
 // @Failure 404 {object} map[string]string
-// @Failure 500 {object} map[string]string
+// handleUpdateKnowledgeDocument 更新知识库文档内容或元信息。
 func (m *Module) handleUpdateKnowledgeDocument(c *gin.Context) {
 	if m == nil || m.knowledge == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge service not available"})
@@ -1361,7 +1371,7 @@ func (m *Module) handleUpdateKnowledgeDocument(c *gin.Context) {
 // @Failure 401 {object} map[string]string
 // @Failure 403 {object} map[string]string
 // @Failure 404 {object} map[string]string
-// @Failure 500 {object} map[string]string
+// handleDeleteKnowledgeDocument 删除指定的知识库文档。
 func (m *Module) handleDeleteKnowledgeDocument(c *gin.Context) {
 	if m == nil || m.knowledge == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge service not available"})
@@ -1426,7 +1436,7 @@ func (m *Module) handleDeleteKnowledgeDocument(c *gin.Context) {
 // @Failure 400 {object} map[string]string "请求参数错误"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /admin/agents [get]
+// handleAdminListAgents 提供管理员视角的智能体列表。
 func (m *Module) handleAdminListAgents(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -1519,7 +1529,7 @@ func (m *Module) handleAdminListAgents(c *gin.Context) {
 // @Failure 404 {object} map[string]string "未找到"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /agents/{id} [get]
+// handleGetAgent 返回单个智能体的详细信息。
 func (m *Module) handleGetAgent(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -1605,7 +1615,7 @@ type upsertRatingRequest struct {
 // @Failure 400 {object} map[string]string "请求参数错误"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /agents/{id}/ratings [get]
+// handleGetRatings 分页查询智能体的评分记录。
 func (m *Module) handleGetRatings(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -1731,7 +1741,7 @@ func (m *Module) handleGetRatings(c *gin.Context) {
 // @Failure 400 {object} map[string]string "请求参数错误"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /agents/{id}/ratings [put]
+// handleUpsertRating 创建或更新用户对智能体的评分。
 func (m *Module) handleUpsertRating(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -1799,6 +1809,7 @@ func (m *Module) handleUpsertRating(c *gin.Context) {
 	})
 }
 
+// loadRatingSummaries 批量加载智能体的评分统计信息。
 func (m *Module) loadRatingSummaries(ctx context.Context, agentIDs []uint64) (map[uint64]ratingSummary, error) {
 	summaries := make(map[uint64]ratingSummary, len(agentIDs))
 	for _, id := range agentIDs {
@@ -1839,6 +1850,7 @@ func (m *Module) loadRatingSummaries(ctx context.Context, agentIDs []uint64) (ma
 	return summaries, nil
 }
 
+// loadRatingSummary 返回指定智能体的评分统计。
 func (m *Module) loadRatingSummary(ctx context.Context, agentID uint64) (ratingSummary, error) {
 	summaries, err := m.loadRatingSummaries(ctx, []uint64{agentID})
 	if err != nil {
@@ -1850,6 +1862,7 @@ func (m *Module) loadRatingSummary(ctx context.Context, agentID uint64) (ratingS
 	return ratingSummary{AgentID: agentID, AverageScore: 0, RatingCount: 0}, nil
 }
 
+// roundRating 对评分值进行一位小数的四舍五入。
 func roundRating(value float64) float64 {
 	if math.IsNaN(value) || math.IsInf(value, 0) {
 		return 0
@@ -1877,7 +1890,7 @@ type conversationClearRequest struct {
 // @Failure 400 {object} map[string]string "请求参数错误"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /agents/{id}/conversations [delete]
+// handleClearConversation 清空智能体会话的聊天记录。
 func (m *Module) handleClearConversation(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -1938,7 +1951,7 @@ func (m *Module) handleClearConversation(c *gin.Context) {
 // @Failure 409 {object} map[string]string "状态冲突"
 // @Failure 500 {object} map[string]string "服务器错误"
 // @Author bizer
-// @Router /agents/{id}/conversations [post]
+// handleCreateConversation 为智能体创建新的会话上下文。
 func (m *Module) handleCreateConversation(c *gin.Context) {
 	if m.db == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not initialized"})
@@ -2067,6 +2080,7 @@ type conversation struct {
 	UpdatedAt time.Time `gorm:"column:updated_at"`
 }
 
+// TableName 指定会话对象在数据库中的表名。
 func (conversation) TableName() string {
 	return "conversations"
 }
@@ -2087,6 +2101,7 @@ type message struct {
 	CreatedAt       time.Time `gorm:"column:created_at"`
 }
 
+// TableName 指定消息对象在数据库中的表名。
 func (message) TableName() string {
 	return "messages"
 }
@@ -2109,6 +2124,7 @@ type messageRecord struct {
 	CreatedAt       time.Time `json:"created_at"`
 }
 
+// bindCreateAgentRequest 解析并校验创建智能体的表单数据。
 func bindCreateAgentRequest(c *gin.Context) (createAgentRequest, *multipart.FileHeader, error) {
 	var req createAgentRequest
 	contentType := strings.ToLower(c.GetHeader("Content-Type"))
@@ -2177,6 +2193,7 @@ func bindCreateAgentRequest(c *gin.Context) (createAgentRequest, *multipart.File
 	return req, nil, nil
 }
 
+// bindUpdateAgentRequest 解析并校验更新智能体的表单数据。
 func bindUpdateAgentRequest(c *gin.Context) (updateAgentRequest, *multipart.FileHeader, error) {
 	var req updateAgentRequest
 	contentType := strings.ToLower(c.GetHeader("Content-Type"))
@@ -2255,6 +2272,7 @@ func bindUpdateAgentRequest(c *gin.Context) (updateAgentRequest, *multipart.File
 	return req, nil, nil
 }
 
+// firstFormValue 获取表单字段的第一个取值。
 func firstFormValue(values []string) string {
 	if len(values) == 0 {
 		return ""
@@ -2262,6 +2280,7 @@ func firstFormValue(values []string) string {
 	return strings.TrimSpace(values[0])
 }
 
+// optionalStringPointer 将可选字段转换为去空格的指针。
 func optionalStringPointer(values []string) *string {
 	if len(values) == 0 {
 		return nil
@@ -2274,6 +2293,7 @@ func optionalStringPointer(values []string) *string {
 	return &result
 }
 
+// formStringPointer 从表单值生成去空格的字符串指针。
 func formStringPointer(values []string) *string {
 	if len(values) == 0 {
 		return nil
@@ -2283,6 +2303,7 @@ func formStringPointer(values []string) *string {
 	return &result
 }
 
+// parseTagsField 解析标签字段并确保唯一性。
 func parseTagsField(values []string) ([]string, error) {
 	if len(values) == 0 {
 		return nil, nil
@@ -2304,6 +2325,7 @@ func parseTagsField(values []string) ([]string, error) {
 	return normalizeTags(values), nil
 }
 
+// parseBoolField 将表单布尔字段解析为指针值。
 func parseBoolField(values []string) (*bool, error) {
 	if len(values) == 0 {
 		return nil, nil
@@ -2319,6 +2341,7 @@ func parseBoolField(values []string) (*bool, error) {
 	return &parsed, nil
 }
 
+// parseUintID 将字符串形式的 ID 转换为无符号整数。
 func parseUintID(raw string) (uint64, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -2331,6 +2354,7 @@ func parseUintID(raw string) (uint64, error) {
 	return id, nil
 }
 
+// ensureKnowledgeAccess 校验用户对智能体知识库的访问权限。
 func (m *Module) ensureKnowledgeAccess(ctx context.Context, agentID, userID uint64, roles []string) (*Agent, bool, error) {
 	if m == nil || m.db == nil {
 		return nil, false, errors.New("database not initialized")
@@ -2345,6 +2369,7 @@ func (m *Module) ensureKnowledgeAccess(ctx context.Context, agentID, userID uint
 	return &agent, false, nil
 }
 
+// KnowledgeService 返回内部持有的知识库服务实例。
 func (m *Module) KnowledgeService() *knowledge.Service {
 	if m == nil {
 		return nil
@@ -2352,6 +2377,7 @@ func (m *Module) KnowledgeService() *knowledge.Service {
 	return m.knowledge
 }
 
+// currentUserContext 从请求上下文提取用户 ID 和角色信息。
 func currentUserContext(c *gin.Context) (uint64, []string) {
 	if c == nil {
 		return 0, nil
@@ -2368,6 +2394,7 @@ func currentUserContext(c *gin.Context) (uint64, []string) {
 	return userID, roles
 }
 
+// parseUserIDClaim 从 JWT 声明中解析用户 ID。
 func parseUserIDClaim(raw interface{}) uint64 {
 	switch v := raw.(type) {
 	case float64:
@@ -2412,6 +2439,7 @@ func parseUserIDClaim(raw interface{}) uint64 {
 	}
 }
 
+// extractRolesClaim 从 JWT 声明中解析角色列表。
 func extractRolesClaim(raw interface{}) []string {
 	switch values := raw.(type) {
 	case []string:
@@ -2445,6 +2473,7 @@ func extractRolesClaim(raw interface{}) []string {
 	}
 }
 
+// hasRole 判断角色列表中是否包含目标角色。
 func hasRole(roles []string, target string) bool {
 	if len(roles) == 0 {
 		return false
@@ -2464,6 +2493,7 @@ func hasRole(roles []string, target string) bool {
 	return false
 }
 
+// normalizeTags 去重并清理标签列表。
 func normalizeTags(tags []string) []string {
 	seen := make(map[string]struct{}, len(tags))
 	result := make([]string, 0, len(tags))
@@ -2480,6 +2510,7 @@ func normalizeTags(tags []string) []string {
 	}
 	return result
 }
+// normalizeStringPointer 去除字符串指针中的多余空白。
 func normalizeStringPointer(value *string) *string {
 	if value == nil {
 		return nil

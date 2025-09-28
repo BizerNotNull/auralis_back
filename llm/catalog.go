@@ -8,6 +8,7 @@ import (
 	"strings"
 )
 
+// ChatModelOption 描述可选的聊天模型及能力标签。
 type ChatModelOption struct {
 	Provider     string   `json:"provider"`
 	Name         string   `json:"name"`
@@ -20,7 +21,7 @@ type ChatModelOption struct {
 
 var defaultChatModelCatalog = []ChatModelOption{
 	{
-		Provider:     "qiniu",
+		Provider:     "openai",
 		Name:         "gpt-oss-120b",
 		DisplayName:  "GPT-OSS 120B",
 		Description:  "默认通用模型，兼容 OpenAI Chat Completions 协议。",
@@ -28,35 +29,35 @@ var defaultChatModelCatalog = []ChatModelOption{
 		Recommended:  true,
 	},
 	{
-		Provider:     "qiniu",
+		Provider:     "openai",
 		Name:         "deepseek/deepseek-v3.1-terminus",
 		DisplayName:  "DeepSeek Terminus v3.1",
 		Description:  "注重复杂推理的旗舰模型，适合深入分析任务。",
 		Capabilities: []string{"chat", "reasoning"},
 	},
 	{
-		Provider:     "qiniu",
+		Provider:     "openai",
 		Name:         "x-ai/grok-4-fast",
 		DisplayName:  "Grok-4 Fast",
 		Description:  "实时搜索增强，响应速度快，适合需要快速反馈的场景。",
 		Capabilities: []string{"chat", "search"},
 	},
 	{
-		Provider:     "qiniu",
+		Provider:     "openai",
 		Name:         "qwen3-max",
 		DisplayName:  "Qwen 3 Max",
 		Description:  "多语言表现优秀的大模型，擅长长文本理解与创作。",
 		Capabilities: []string{"chat", "multilingual"},
 	},
 	{
-		Provider:     "qiniu",
+		Provider:     "openai",
 		Name:         "MiniMax-M1",
 		DisplayName:  "MiniMax M1",
 		Description:  "均衡型模型，适合通用助理和内容创作。",
 		Capabilities: []string{"chat"},
 	},
 	{
-		Provider:     "qiniu",
+		Provider:     "openai",
 		Name:         "doubao-seed-1.6",
 		DisplayName:  "Doubao Seed 1.6",
 		Description:  "语义理解稳定，可作入门业务接入模型。",
@@ -64,6 +65,7 @@ var defaultChatModelCatalog = []ChatModelOption{
 	},
 }
 
+// loadChatModelCatalog 加载模型目录（支持环境变量覆盖）。
 func loadChatModelCatalog() []ChatModelOption {
 	if catalog := loadChatModelCatalogFromEnv(); len(catalog) > 0 {
 		return catalog
@@ -71,6 +73,7 @@ func loadChatModelCatalog() []ChatModelOption {
 	return append([]ChatModelOption(nil), defaultChatModelCatalog...)
 }
 
+// loadChatModelCatalogFromEnv 从环境变量或文件读取模型目录。
 func loadChatModelCatalogFromEnv() []ChatModelOption {
 	rawInline := strings.TrimSpace(os.Getenv("LLM_MODEL_CATALOG"))
 	if rawInline != "" {

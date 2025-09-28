@@ -9,11 +9,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// Guard 封装 JWT 中间件以提供授权辅助方法。
 type Guard struct {
 	jwt *jwt.GinJWTMiddleware
 }
 
-// NewGuard builds a Guard helper around the provided JWT middleware instance.
+// NewGuard 根据给定的 JWT 中间件构建守卫辅助。
 func NewGuard(jwtMiddleware *jwt.GinJWTMiddleware) *Guard {
 	if jwtMiddleware == nil {
 		return nil
@@ -21,7 +22,7 @@ func NewGuard(jwtMiddleware *jwt.GinJWTMiddleware) *Guard {
 	return &Guard{jwt: jwtMiddleware}
 }
 
-// Guard exposes reusable authorization helpers for other modules.
+// Guard 返回模块内部复用的守卫实例。
 func (m *Module) Guard() *Guard {
 	if m == nil {
 		return nil
@@ -29,7 +30,7 @@ func (m *Module) Guard() *Guard {
 	return NewGuard(m.jwtMiddleware)
 }
 
-// RequireAuthenticated ensures the request carries a valid JWT.
+// RequireAuthenticated 确保请求携带有效的 JWT。
 func (g *Guard) RequireAuthenticated() gin.HandlerFunc {
 	if g == nil || g.jwt == nil {
 		return func(c *gin.Context) {
@@ -39,7 +40,7 @@ func (g *Guard) RequireAuthenticated() gin.HandlerFunc {
 	return g.jwt.MiddlewareFunc()
 }
 
-// RequireAnyRole authorises requests that own at least one of the provided roles.
+// RequireAnyRole 要求请求至少具备指定角色之一。
 func (g *Guard) RequireAnyRole(roles ...string) gin.HandlerFunc {
 	normalized := make([]string, 0, len(roles))
 	for _, role := range roles {
@@ -92,7 +93,7 @@ func (g *Guard) RequireAnyRole(roles ...string) gin.HandlerFunc {
 	}
 }
 
-// RequireRole authorises requests that own the specified role.
+// RequireRole 限定请求必须拥有给定角色。
 func (g *Guard) RequireRole(role string) gin.HandlerFunc {
 	return g.RequireAnyRole(role)
 }

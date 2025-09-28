@@ -17,10 +17,12 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// mustLoadEnv 加载 .env 配置文件，确保运行时环境变量可用。
 func mustLoadEnv() {
 	_ = godotenv.Load()
 }
 
+// configureCORS 配置 Gin 的跨域策略，限制允许来源并启用凭证支持。
 func configureCORS(r *gin.Engine) {
 	rawOrigins := strings.Split(os.Getenv("CORS_ALLOWED_ORIGINS"), ",")
 	allowOrigins := make([]string, 0, len(rawOrigins))
@@ -50,6 +52,7 @@ func configureCORS(r *gin.Engine) {
 	r.Use(cors.New(corsConfig))
 }
 
+// main 初始化所有模块并启动 HTTP 服务入口。
 func main() {
 	mustLoadEnv()
 

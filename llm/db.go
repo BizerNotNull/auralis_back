@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
+// openDatabaseFromEnv 根据环境变量建立 LLM 模块使用的数据库连接。
 func openDatabaseFromEnv() (*gorm.DB, error) {
 	dsn := strings.TrimSpace(os.Getenv("DATABASE_DSN"))
 	if dsn == "" {
@@ -30,6 +31,7 @@ func openDatabaseFromEnv() (*gorm.DB, error) {
 	return openDatabase(driver, dsn)
 }
 
+// openDatabase 按驱动类型初始化 Gorm 数据库实例。
 func openDatabase(driver, dsn string) (*gorm.DB, error) {
 	switch strings.ToLower(driver) {
 	case "postgres", "postgresql", "pg":
@@ -43,6 +45,7 @@ func openDatabase(driver, dsn string) (*gorm.DB, error) {
 	}
 }
 
+// inferDriverFromDSN 从 DSN 推断可用的数据库驱动标识。
 func inferDriverFromDSN(dsn string) string {
 	lower := strings.ToLower(dsn)
 	switch {

@@ -20,16 +20,17 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
+// maxAvatarBytes 限制头像上传的最大体积。
 const maxAvatarBytes int64 = 5 * 1024 * 1024
 
-// AvatarStorage provides helpers for storing avatar images in MinIO/S3.
+// AvatarStorage 封装头像在 MinIO/S3 中的存储操作。
 type AvatarStorage struct {
 	client    *minio.Client
 	bucket    string
 	publicURL string
 }
 
-// NewAvatarStorageFromEnv initialises AvatarStorage using MINIO_* environment variables.
+// NewAvatarStorageFromEnv 基于 MINIO_* 环境变量初始化头像存储。
 func NewAvatarStorageFromEnv() (*AvatarStorage, error) {
 	endpoint := strings.TrimSpace(os.Getenv("MINIO_ENDPOINT"))
 	accessKey := strings.TrimSpace(os.Getenv("MINIO_ACCESS_KEY"))
@@ -77,8 +78,8 @@ func NewAvatarStorageFromEnv() (*AvatarStorage, error) {
 	}, nil
 }
 
-// Upload stores the provided avatar image beneath the given path segments.
-// The final object key will be avatars/<segments...>/<uuid>.<ext>.
+// Upload 按路径片段保存上传的头像文件。
+// 最终的对象键格式为 avatars/<路径片段>/<uuid>.<扩展名>。
 func (s *AvatarStorage) Upload(ctx context.Context, fileHeader *multipart.FileHeader, pathSegments ...string) (string, error) {
 	if s == nil || s.client == nil {
 		return "", errors.New("avatar storage not configured")
@@ -160,7 +161,7 @@ func (s *AvatarStorage) Remove(ctx context.Context, avatarURL string) error {
 	return s.client.RemoveObject(removeCtx, s.bucket, objectName, minio.RemoveObjectOptions{})
 }
 
-// PresignedURL returns a temporary URL for accessing the provided avatar.
+// PresignedURL 为指定头像生成临时可访问的 URL。
 func (s *AvatarStorage) PresignedURL(ctx context.Context, raw string, expiry time.Duration) (string, error) {
 	if s == nil || s.client == nil {
 		return strings.TrimSpace(raw), nil
@@ -197,12 +198,14 @@ func (s *AvatarStorage) PresignedURL(ctx context.Context, raw string, expiry tim
 	return url.String(), nil
 }
 
+// buildPublicURL 拼接公开访问的头像地址。
 func (s *AvatarStorage) buildPublicURL(objectName string) string {
 	base := strings.TrimSuffix(s.publicURL, "/")
 	object := strings.TrimPrefix(objectName, "/")
 	return fmt.Sprintf("%s/%s/%s", base, s.bucket, object)
 }
 
+// objectNameFromURL 从 URL 中解析存储对象名称。
 func (s *AvatarStorage) objectNameFromURL(raw string) (string, bool) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -246,6 +249,7 @@ func (s *AvatarStorage) objectNameFromURL(raw string) (string, bool) {
 	return "", false
 }
 
+// isAllowedAvatarContent 校验头像的内容类型。
 func isAllowedAvatarContent(contentType string) bool {
 	switch strings.ToLower(strings.TrimSpace(contentType)) {
 	case "image/png", "image/x-png":
@@ -261,6 +265,7 @@ func isAllowedAvatarContent(contentType string) bool {
 	}
 }
 
+// avatarExtension 根据内容类型推断文件扩展名。
 func avatarExtension(filename, contentType string) string {
 	switch strings.ToLower(strings.TrimSpace(contentType)) {
 	case "image/png", "image/x-png":

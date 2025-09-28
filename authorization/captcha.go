@@ -8,7 +8,7 @@ import (
 	"github.com/mojocn/base64Captcha"
 )
 
-// CaptchaChallenge represents an issued captcha image.
+// CaptchaChallenge 表示生成的验证码图片信息。
 type CaptchaChallenge struct {
 	ID          string
 	ImageBase64 string
@@ -16,7 +16,7 @@ type CaptchaChallenge struct {
 	TTL         time.Duration
 }
 
-// CaptchaStore manages captcha generation and verification.
+// CaptchaStore 负责验证码的生成与校验。
 type CaptchaStore struct {
 	mu     sync.Mutex
 	driver *base64Captcha.DriverDigit
@@ -24,7 +24,7 @@ type CaptchaStore struct {
 	ttl    time.Duration
 }
 
-// NewCaptchaStore creates an image-based captcha store with the provided ttl window.
+// NewCaptchaStore 创建带过期时间的图片验证码存储。
 func NewCaptchaStore(ttl time.Duration) *CaptchaStore {
 	if ttl <= 0 {
 		ttl = 2 * time.Minute
@@ -36,7 +36,7 @@ func NewCaptchaStore(ttl time.Duration) *CaptchaStore {
 	}
 }
 
-// Issue generates a new captcha challenge.
+// Issue 生成新的验证码挑战并返回展示数据。
 func (s *CaptchaStore) Issue() CaptchaChallenge {
 	if s == nil {
 		return CaptchaChallenge{}
@@ -60,7 +60,7 @@ func (s *CaptchaStore) Issue() CaptchaChallenge {
 	return CaptchaChallenge{ID: id, ImageBase64: imageData, ExpiresAt: expiresAt, TTL: s.ttl}
 }
 
-// Verify checks whether the supplied captcha answer is valid.
+// Verify 校验用户提交的验证码是否有效。
 func (s *CaptchaStore) Verify(id, answer string) bool {
 	if s == nil {
 		return true

@@ -17,6 +17,7 @@ import (
 	"gorm.io/gorm"
 )
 
+// Service 管理知识库文档、切片与向量索引。
 type Service struct {
 	db              *gorm.DB
 	embedder        Embedder
@@ -27,6 +28,7 @@ type Service struct {
 	defaultVectorSz int
 }
 
+// DocumentInput 表示创建知识文档时的输入参数。
 type DocumentInput struct {
 	Title   string   `json:"title"`
 	Summary *string  `json:"summary,omitempty"`
@@ -36,6 +38,7 @@ type DocumentInput struct {
 	Status  string   `json:"status"`
 }
 
+// DocumentUpdate 描述更新文档时可修改的字段。
 type DocumentUpdate struct {
 	Title   *string   `json:"title"`
 	Summary *string   `json:"summary"`
@@ -45,6 +48,7 @@ type DocumentUpdate struct {
 	Status  *string   `json:"status"`
 }
 
+// DocumentRecord 组合文档数据及元信息用于对外返回。
 type DocumentRecord struct {
 	ID         uint64    `json:"id"`
 	AgentID    uint64    `json:"agent_id"`
@@ -61,6 +65,7 @@ type DocumentRecord struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+// ContextSnippet 代表召回结果中的上下文片段。
 type ContextSnippet struct {
 	DocumentID uint64   `json:"document_id"`
 	Title      string   `json:"title"`
@@ -72,6 +77,7 @@ type ContextSnippet struct {
 	Tags       []string `json:"tags"`
 }
 
+// NewServiceFromEnv 基于环境配置构建知识库服务。
 func NewServiceFromEnv(db *gorm.DB) (*Service, error) {
 	if db == nil {
 		return nil, errors.New("knowledge: database connection is required")
@@ -113,6 +119,7 @@ func NewServiceFromEnv(db *gorm.DB) (*Service, error) {
 	return service, nil
 }
 
+// getEnvDefault 读取环境变量并提供默认值。
 func getEnvDefault(key string, fallback string) string {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value != "" {
@@ -121,6 +128,7 @@ func getEnvDefault(key string, fallback string) string {
 	return fallback
 }
 
+// AutoMigrate 执行知识库相关的数据表迁移。
 func (s *Service) AutoMigrate() error {
 	if s.db == nil {
 		return errors.New("knowledge: database connection is not configured")
@@ -128,6 +136,7 @@ func (s *Service) AutoMigrate() error {
 	return s.db.AutoMigrate(&Document{}, &Chunk{})
 }
 
+// ListDocuments 按条件列出指定智能体的文档。
 func (s *Service) ListDocuments(ctx context.Context, agentID uint64) ([]DocumentRecord, error) {
 	if s.db == nil {
 		return nil, errors.New("knowledge: database connection is not configured")
@@ -165,6 +174,7 @@ func (s *Service) ListDocuments(ctx context.Context, agentID uint64) ([]Document
 	return records, nil
 }
 
+// GetDocument 获取单个知识文档及其内容。
 func (s *Service) GetDocument(ctx context.Context, agentID uint64, docID uint64) (*DocumentRecord, error) {
 	if s.db == nil {
 		return nil, errors.New("knowledge: database connection is not configured")
@@ -184,6 +194,7 @@ func (s *Service) GetDocument(ctx context.Context, agentID uint64, docID uint64)
 	return &record, nil
 }
 
+// CreateDocument 创建新的知识文档并触发切片与向量写入。
 func (s *Service) CreateDocument(ctx context.Context, agentID uint64, userID uint64, input DocumentInput) (*DocumentRecord, error) {
 	if s.db == nil {
 		return nil, errors.New("knowledge: database connection is not configured")
@@ -301,6 +312,7 @@ func (s *Service) CreateDocument(ctx context.Context, agentID uint64, userID uin
 	return &record, nil
 }
 
+// UpdateDocument 更新知识文档并同步向量索引。
 func (s *Service) UpdateDocument(ctx context.Context, agentID uint64, docID uint64, userID uint64, changes DocumentUpdate) (*DocumentRecord, error) {
 	if s.db == nil {
 		return nil, errors.New("knowledge: database connection is not configured")
@@ -518,6 +530,7 @@ func (s *Service) UpdateDocument(ctx context.Context, agentID uint64, docID uint
 	return &record, nil
 }
 
+// DeleteDocument 删除文档及其关联的切片和向量。
 func (s *Service) DeleteDocument(ctx context.Context, agentID uint64, docID uint64) error {
 	if s.db == nil {
 		return errors.New("knowledge: database connection is not configured")
@@ -551,6 +564,7 @@ func (s *Service) DeleteDocument(ctx context.Context, agentID uint64, docID uint
 	})
 }
 
+// QueryTopChunks 基于查询向量召回最相关的文档片段。
 func (s *Service) QueryTopChunks(ctx context.Context, agentID uint64, query string, limit int) ([]ContextSnippet, error) {
 	if s.embedder == nil || s.vectors == nil {
 		return nil, nil
@@ -627,6 +641,7 @@ func (s *Service) QueryTopChunks(ctx context.Context, agentID uint64, query stri
 	return snippets, nil
 }
 
+// vectorSize 返回当前使用的向量维度。
 func (s *Service) vectorSize() int {
 	if s.defaultVectorSz > 0 {
 		return s.defaultVectorSz
@@ -634,6 +649,7 @@ func (s *Service) vectorSize() int {
 	return 0
 }
 
+// collectionName 根据智能体生成向量集合名称。
 func (s *Service) collectionName(agentID uint64) string {
 	if agentID == 0 {
 		return "agent_knowledge"
@@ -641,6 +657,7 @@ func (s *Service) collectionName(agentID uint64) string {
 	return fmt.Sprintf("agent_%d_knowledge", agentID)
 }
 
+// sanitizeDocumentInput 清洗文档输入内容并填充默认值。
 func sanitizeDocumentInput(input DocumentInput) DocumentInput {
 	sanitized := DocumentInput{
 		Title:   strings.TrimSpace(input.Title),
@@ -663,6 +680,7 @@ func sanitizeDocumentInput(input DocumentInput) DocumentInput {
 	return sanitized
 }
 
+// sanitizeStatus 规范化文档状态标识。
 func sanitizeStatus(value string, fallback string) string {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	switch normalized {
@@ -678,6 +696,7 @@ func sanitizeStatus(value string, fallback string) string {
 	}
 }
 
+// tagsToJSON 将标签列表编码为 JSON。
 func tagsToJSON(tags []string) datatypes.JSON {
 	normalized := normalizeTags(tags)
 	if len(normalized) == 0 {
@@ -690,6 +709,7 @@ func tagsToJSON(tags []string) datatypes.JSON {
 	return datatypes.JSON(raw)
 }
 
+// normalizeTags 清洗并去重标签列表。
 func normalizeTags(tags []string) []string {
 	seen := make(map[string]struct{}, len(tags))
 	result := make([]string, 0, len(tags))
@@ -709,6 +729,7 @@ func normalizeTags(tags []string) []string {
 	return result
 }
 
+// parseTags 从数据库字段解析标签列表。
 func parseTags(raw datatypes.JSON) []string {
 	if len(raw) == 0 {
 		return nil
@@ -720,6 +741,7 @@ func parseTags(raw datatypes.JSON) []string {
 	return normalizeTags(tags)
 }
 
+// buildDocumentRecord 构造用于响应的文档记录。
 func buildDocumentRecord(doc Document, chunkCount int, includeContent bool) DocumentRecord {
 	record := DocumentRecord{
 		ID:         doc.ID,
@@ -741,6 +763,7 @@ func buildDocumentRecord(doc Document, chunkCount int, includeContent bool) Docu
 	return record
 }
 
+// toStringSlice 将任意字符串数组转换为去空格的切片。
 func toStringSlice(values []interface{}) []string {
 	result := make([]string, 0, len(values))
 	for _, value := range values {
